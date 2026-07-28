@@ -1,0 +1,36 @@
+# JavaScript
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Rust
+target/
+
+# Tauri generated files
+src-tauri/gen/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Local data
+*.db
+*.db-shm
+*.db-wal
+*.ejourney
+ElectronicJourney/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Codex local logs
+.codex-log/

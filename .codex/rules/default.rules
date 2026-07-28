@@ -1,0 +1,82 @@
+# .codex/rules/default.rules
+# Project-local policy for commands that request execution outside the sandbox.
+
+prefix_rule(
+    pattern = ["git", ["status", "diff", "log", "show"]],
+    decision = "allow",
+    justification = "Read-only Git inspection is safe and required for scoped edits.",
+    match = [
+        "git status",
+        "git diff",
+        "git log --oneline",
+        "git show HEAD",
+    ],
+)
+
+prefix_rule(
+    pattern = ["npm", ["test", "run"]],
+    decision = "allow",
+    justification = "Allow repository-defined frontend tests and checks.",
+    match = [
+        "npm test",
+        "npm run lint",
+        "npm run typecheck",
+        "npm run build",
+    ],
+)
+
+prefix_rule(
+    pattern = ["cargo", ["check", "test", "fmt", "clippy"]],
+    decision = "allow",
+    justification = "Allow Rust formatting, compilation checks, lints, and tests.",
+    match = [
+        "cargo check --workspace",
+        "cargo test --workspace",
+        "cargo fmt --all -- --check",
+        "cargo clippy --workspace",
+    ],
+)
+
+prefix_rule(
+    pattern = ["git", ["push", "reset", "clean"]],
+    decision = "prompt",
+    justification = "Remote writes and destructive Git operations require explicit confirmation.",
+    match = [
+        "git push",
+        "git reset --hard HEAD~1",
+        "git clean -fd",
+    ],
+)
+
+prefix_rule(
+    pattern = ["npm", ["install", "uninstall", "update"]],
+    decision = "prompt",
+    justification = "Dependency changes affect the lockfile and software supply chain.",
+    match = [
+        "npm install",
+        "npm install lodash",
+        "npm uninstall lodash",
+        "npm update",
+    ],
+)
+
+prefix_rule(
+    pattern = ["cargo", ["add", "update", "install"]],
+    decision = "prompt",
+    justification = "Rust dependency and toolchain changes require explicit confirmation.",
+    match = [
+        "cargo add anyhow",
+        "cargo update",
+        "cargo install cargo-audit",
+    ],
+)
+
+prefix_rule(
+    pattern = ["rm", "-rf"],
+    decision = "forbidden",
+    justification = "Recursive forced deletion is forbidden; use a scoped recoverable removal instead.",
+    match = [
+        "rm -rf dist",
+        "rm -rf /",
+    ],
+)
