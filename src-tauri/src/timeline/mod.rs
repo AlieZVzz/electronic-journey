@@ -21,6 +21,7 @@ pub struct TimelineCapture {
     pub id: String,
     pub captured_at_utc: DateTime<Utc>,
     pub file_size: u64,
+    pub upload_state: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,6 +55,7 @@ pub async fn list_captures(
                 id: capture.id,
                 captured_at_utc: capture.captured_at_utc,
                 file_size: capture.file_size,
+                upload_state: capture.upload_state,
             })
             .collect(),
         next_offset: page.next_offset,

@@ -6,6 +6,10 @@ import type {
   CaptureSettings,
   RecordingState,
   TimelinePageResult,
+  RemoteConnectionTest,
+  RemoteProfile,
+  SaveRemoteProfileInput,
+  UploadBatchProgress,
 } from "../types/app";
 
 declare global {
@@ -19,7 +23,7 @@ const browserSnapshot: AppSnapshot = {
   nextCaptureAt: null,
   todayCount: 0,
   localStorageBytes: 0,
-  pendingAiJobs: 0,
+  pendingUploads: 0,
   permissionGranted: false,
   permissionState: "not_determined",
   lastError: null,
@@ -138,5 +142,69 @@ export const desktopApi = {
     }
 
     return invoke<void>("delete_timeline_capture", { captureId });
+  },
+
+  async getRemoteProfile(): Promise<RemoteProfile | null> {
+    if (!isTauriRuntime()) {
+      return null;
+    }
+    return invoke<RemoteProfile | null>("get_remote_profile");
+  },
+
+  async pickPrivateKeyFile(): Promise<string | null> {
+    if (!isTauriRuntime()) {
+      throw new Error("只能在桌面应用中选择 SSH 私钥文件。");
+    }
+    return invoke<string | null>("pick_private_key_file");
+  },
+
+  async probeRemoteHostKey(host: string, port: number): Promise<string> {
+    if (!isTauriRuntime()) {
+      throw new Error("只能在桌面应用中读取远程服务器指纹。");
+    }
+    return invoke<string>("probe_remote_host_key", { host, port });
+  },
+
+  async saveRemoteProfile(input: SaveRemoteProfileInput): Promise<RemoteProfile> {
+    if (!isTauriRuntime()) {
+      throw new Error("只能在桌面应用中保存远程服务器配置。");
+    }
+    return invoke<RemoteProfile>("save_remote_profile", { input });
+  },
+
+  async testRemoteProfile(): Promise<RemoteConnectionTest> {
+    if (!isTauriRuntime()) {
+      throw new Error("只能在桌面应用中测试远程服务器。");
+    }
+    return invoke<RemoteConnectionTest>("test_remote_profile");
+  },
+
+  async uploadSelectedCaptures(
+    captureIds: string[],
+  ): Promise<UploadBatchProgress> {
+    if (!isTauriRuntime()) {
+      throw new Error("只能在桌面应用中上传截图。");
+    }
+    return invoke<UploadBatchProgress>("upload_selected_captures", {
+      captureIds,
+    });
+  },
+
+  async getUploadBatchStatus(
+    batchId: string,
+  ): Promise<UploadBatchProgress> {
+    if (!isTauriRuntime()) {
+      throw new Error("只能在桌面应用中读取上传状态。");
+    }
+    return invoke<UploadBatchProgress>("get_upload_batch_status", {
+      batchId,
+    });
+  },
+
+  async getActiveUploadBatch(): Promise<UploadBatchProgress | null> {
+    if (!isTauriRuntime()) {
+      return null;
+    }
+    return invoke<UploadBatchProgress | null>("get_active_upload_batch");
   },
 };

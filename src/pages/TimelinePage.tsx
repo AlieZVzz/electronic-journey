@@ -9,7 +9,10 @@ import {
 
 import { desktopApi } from "../api/desktop";
 import { groupTimelineCaptures } from "../lib/timeline";
-import type { TimelineCapture } from "../types/app";
+import type {
+  TimelineCapture,
+  UploadBatchProgress,
+} from "../types/app";
 
 const MAX_PREVIEW_CACHE_ITEMS = 3;
 const MAX_PREVIEW_CACHE_BYTES = 48 * 1024 * 1024;
@@ -28,6 +31,11 @@ type PreviewState = {
   naturalHeight: number | null;
 };
 
+type UploadConfirmation = {
+  captureIds: string[];
+  totalBytes: number;
+};
+
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat("zh-CN", {
     hour: "2-digit",
@@ -40,6 +48,21 @@ function formatBytes(bytes: number): string {
   return bytes < 1024 * 1024
     ? `${Math.max(1, Math.round(bytes / 1024))} KB`
     : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function uploadStateLabel(state: TimelineCapture["uploadState"]): string | null {
+  switch (state) {
+    case "pending":
+      return "等待上传";
+    case "uploading":
+      return "上传中";
+    case "uploaded":
+      return "已上传";
+    case "failed":
+      return "上传失败";
+    default:
+      return null;
+  }
 }
 
 function TimelineThumbnail({ captureId }: { captureId: string }) {
@@ -124,9 +147,18 @@ export function TimelinePage() {
   const [deleteCandidate, setDeleteCandidate] =
     useState<TimelineCapture | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [uploadProgress, setUploadProgress] =
+    useState<UploadBatchProgress | null>(null);
+  const [uploadMessage, setUploadMessage] = useState<string | null>(null);
+  const [uploadConfirmation, setUploadConfirmation] =
+    useState<UploadConfirmation | null>(null);
+  const [startingUpload, setStartingUpload] = useState(false);
   const [previewScale, setPreviewScale] = useState<
     "fit" | "pixel" | number
-  >("pixel");
+  >("fit");
   const previewCacheRef = useRef(new Map<string, PreviewCacheEntry>());
   const pendingPreviewsRef = useRef(new Map<string, Promise<string>>());
   const activePreviewIdRef = useRef<string | null>(null);
@@ -135,6 +167,9 @@ export function TimelinePage() {
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const deleteCancelButtonRef = useRef<HTMLButtonElement | null>(null);
   const groups = useMemo(() => groupTimelineCaptures(captures), [captures]);
+  const uploadActive =
+    uploadProgress?.state === "pending" ||
+    uploadProgress?.state === "uploading";
   const resolvedPreviewScale =
     previewScale === "pixel"
       ? 1 / Math.max(1, window.devicePixelRatio)
@@ -222,9 +257,100 @@ export function TimelinePage() {
     }
   }, []);
 
+  const applyUploadProgress = useCallback(
+    (progress: UploadBatchProgress) => {
+      const states = new Map(
+        progress.items.map((item) => [item.captureId, item.state]),
+      );
+      setCaptures((current) =>
+        current.map((capture) => {
+          const uploadState = states.get(capture.id);
+          return uploadState
+            ? { ...capture, uploadState }
+            : capture;
+        }),
+      );
+    },
+    [],
+  );
+
   useEffect(() => {
     void loadPage(0, true);
   }, [loadPage]);
+
+  useEffect(() => {
+    let active = true;
+    void desktopApi
+      .getActiveUploadBatch()
+      .then((progress) => {
+        if (!active || !progress) {
+          return;
+        }
+        setUploadProgress(progress);
+        applyUploadProgress(progress);
+        setUploadMessage(
+          `后台上传进行中：已处理 ${
+            progress.uploadedItems + progress.failedItems
+          } / ${progress.totalItems} 张。`,
+        );
+      })
+      .catch((reason) => {
+        if (active) {
+          setError(String(reason));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [applyUploadProgress]);
+
+  useEffect(() => {
+    if (!uploadActive || !uploadProgress) {
+      return;
+    }
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void desktopApi
+        .getUploadBatchStatus(uploadProgress.batchId)
+        .then((progress) => {
+          if (!active) {
+            return;
+          }
+          setUploadProgress(progress);
+          applyUploadProgress(progress);
+          const processed =
+            progress.uploadedItems + progress.failedItems;
+          if (
+            progress.state === "pending" ||
+            progress.state === "uploading"
+          ) {
+            setUploadMessage(
+              `后台上传进行中：已处理 ${processed} / ${progress.totalItems} 张。`,
+            );
+            return;
+          }
+          setUploadMessage(
+            progress.failedItems === 0
+              ? `后台上传完成：已验证上传 ${progress.uploadedItems} 张原图。`
+              : `后台上传完成：${progress.uploadedItems} 张成功，${progress.failedItems} 张失败。${
+                  progress.lastError ? ` ${progress.lastError}` : ""
+                }`,
+          );
+          window.dispatchEvent(
+            new Event("electronic-journey:snapshot-changed"),
+          );
+        })
+        .catch((reason) => {
+          if (active) {
+            setError(String(reason));
+          }
+        });
+    }, 800);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [applyUploadProgress, uploadActive, uploadProgress]);
 
   useEffect(
     () => () => {
@@ -294,6 +420,19 @@ export function TimelinePage() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [deleteCandidate, deletingId]);
 
+  useEffect(() => {
+    if (!uploadConfirmation) {
+      return;
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setUploadConfirmation(null);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [uploadConfirmation]);
+
   function closePreview() {
     previewRequestRef.current += 1;
     activePreviewIdRef.current = null;
@@ -305,7 +444,7 @@ export function TimelinePage() {
     const requestId = previewRequestRef.current + 1;
     previewRequestRef.current = requestId;
     activePreviewIdRef.current = capture.id;
-    setPreviewScale("pixel");
+    setPreviewScale("fit");
     setPreview({
       capture,
       url: null,
@@ -391,6 +530,11 @@ export function TimelinePage() {
       setCaptures((current) =>
         current.filter(({ id }) => id !== capture.id),
       );
+      setSelectedIds((current) => {
+        const next = new Set(current);
+        next.delete(capture.id);
+        return next;
+      });
       setNextOffset((current) =>
         current === null ? null : Math.max(0, current - 1),
       );
@@ -405,6 +549,82 @@ export function TimelinePage() {
     }
   }
 
+  function toggleCaptureSelection(captureId: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(captureId)) {
+        next.delete(captureId);
+      } else {
+        next.add(captureId);
+      }
+      return next;
+    });
+    setUploadConfirmation(null);
+    setUploadMessage(null);
+  }
+
+  function toggleAllLoadedCaptures() {
+    setSelectedIds((current) => {
+      const allLoadedSelected =
+        captures.length > 0 &&
+        captures.every((capture) => current.has(capture.id));
+      return allLoadedSelected
+        ? new Set()
+        : new Set(captures.map((capture) => capture.id));
+    });
+    setUploadConfirmation(null);
+    setUploadMessage(null);
+  }
+
+  function prepareUploadSelection() {
+    if (selectedIds.size === 0 || uploadActive || startingUpload) {
+      return;
+    }
+    const selected = captures.filter((capture) =>
+      selectedIds.has(capture.id),
+    );
+    setUploadConfirmation({
+      captureIds: selected.map((capture) => capture.id),
+      totalBytes: selected.reduce(
+        (total, capture) => total + capture.fileSize,
+        0,
+      ),
+    });
+  }
+
+  async function startConfirmedUpload() {
+    if (!uploadConfirmation || uploadActive || startingUpload) {
+      return;
+    }
+    const selection = uploadConfirmation;
+    setUploadConfirmation(null);
+    setStartingUpload(true);
+    setError(null);
+    setUploadMessage(null);
+    try {
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve());
+      });
+      const progress = await desktopApi.uploadSelectedCaptures(
+        selection.captureIds,
+      );
+      setUploadProgress(progress);
+      applyUploadProgress(progress);
+      setUploadMessage(
+        `已开始在后台上传 ${progress.totalItems} 张原图；可以继续浏览或切换页面。`,
+      );
+      setSelectedIds(new Set());
+      window.dispatchEvent(
+        new Event("electronic-journey:snapshot-changed"),
+      );
+    } catch (reason) {
+      await loadPage(0, true);
+      setError(String(reason));
+    } finally {
+      setStartingUpload(false);
+    }
+  }
+
   return (
     <section className="timeline-page">
       <header className="page-header timeline-header">
@@ -413,14 +633,49 @@ export function TimelinePage() {
           <h1>时间线</h1>
           <p>按当前系统时区排列；缩略图和原图都从本地读取。</p>
         </div>
-        <button
-          className="button button--ghost"
-          disabled={loading}
-          onClick={() => void loadPage(0, true)}
-          type="button"
-        >
-          刷新
-        </button>
+        <div className="timeline-header__actions">
+          <span>
+            {selectedIds.size > 0
+              ? `已选 ${selectedIds.size} 张`
+              : "尚未选择"}
+          </span>
+          <button
+            className="button button--ghost"
+            disabled={captures.length === 0}
+            onClick={toggleAllLoadedCaptures}
+            type="button"
+          >
+            {captures.length > 0 &&
+            captures.every((capture) => selectedIds.has(capture.id))
+              ? "取消全选"
+              : "全选已加载"}
+          </button>
+          <button
+            className="button button--primary"
+            disabled={
+              selectedIds.size === 0 || uploadActive || startingUpload
+            }
+            onClick={prepareUploadSelection}
+            type="button"
+          >
+            {startingUpload
+              ? "正在建立后台任务…"
+              : uploadActive
+              ? `后台上传 ${
+                  (uploadProgress?.uploadedItems ?? 0) +
+                  (uploadProgress?.failedItems ?? 0)
+                } / ${uploadProgress?.totalItems ?? 0}`
+              : "上传所选"}
+          </button>
+          <button
+            className="button button--ghost"
+            disabled={loading}
+            onClick={() => void loadPage(0, true)}
+            type="button"
+          >
+            刷新
+          </button>
+        </div>
       </header>
 
       {error && (
@@ -428,7 +683,6 @@ export function TimelinePage() {
           {error}
         </div>
       )}
-
       {loading && captures.length === 0 ? (
         <div className="timeline-loading" aria-live="polite">
           正在读取本地图片索引…
@@ -448,41 +702,77 @@ export function TimelinePage() {
                 <span>{group.items.length} 张</span>
               </div>
               <div className="timeline-grid">
-                {group.items.map((capture) => (
-                  <button
-                    aria-label={`查看 ${formatTime(capture.capturedAtUtc)} 的截图`}
-                    className="timeline-card"
-                    key={capture.id}
-                    onClick={() => void openPreview(capture)}
-                    onContextMenu={(event) =>
-                      openContextMenu(event, capture)
-                    }
-                    onKeyDown={(event) => {
-                      if (
-                        event.key === "ContextMenu" ||
-                        (event.shiftKey && event.key === "F10")
-                      ) {
-                        event.preventDefault();
-                        const bounds =
-                          event.currentTarget.getBoundingClientRect();
-                        openContextMenuAt(
-                          bounds.left + 18,
-                          bounds.top + 18,
-                          capture,
-                        );
-                      }
-                    }}
-                    type="button"
-                  >
-                    <TimelineThumbnail captureId={capture.id} />
-                    <span className="timeline-card__meta">
-                      <strong>{formatTime(capture.capturedAtUtc)}</strong>
-                      <small>
-                        {formatBytes(capture.fileSize)} · 本地图片
-                      </small>
-                    </span>
-                  </button>
-                ))}
+                {group.items.map((capture) => {
+                  const stateLabel = uploadStateLabel(
+                    capture.uploadState,
+                  );
+                  return (
+                    <div
+                      className={`timeline-card-wrap ${
+                        selectedIds.has(capture.id) ? "is-selected" : ""
+                      }`}
+                      key={capture.id}
+                    >
+                      <label
+                        className="timeline-card__select"
+                        title="选择用于上传"
+                      >
+                        <input
+                          aria-label={`选择 ${formatTime(
+                            capture.capturedAtUtc,
+                          )} 的截图`}
+                          checked={selectedIds.has(capture.id)}
+                          onChange={() =>
+                            toggleCaptureSelection(capture.id)
+                          }
+                          type="checkbox"
+                        />
+                        <span aria-hidden="true" />
+                      </label>
+                      {stateLabel && (
+                        <span
+                          className={`timeline-card__upload-state is-${capture.uploadState}`}
+                        >
+                          {stateLabel}
+                        </span>
+                      )}
+                      <button
+                        aria-label={`查看 ${formatTime(capture.capturedAtUtc)} 的截图`}
+                        className="timeline-card"
+                        onClick={() => void openPreview(capture)}
+                        onContextMenu={(event) =>
+                          openContextMenu(event, capture)
+                        }
+                        onKeyDown={(event) => {
+                          if (
+                            event.key === "ContextMenu" ||
+                            (event.shiftKey && event.key === "F10")
+                          ) {
+                            event.preventDefault();
+                            const bounds =
+                              event.currentTarget.getBoundingClientRect();
+                            openContextMenuAt(
+                              bounds.left + 18,
+                              bounds.top + 18,
+                              capture,
+                            );
+                          }
+                        }}
+                        type="button"
+                      >
+                        <TimelineThumbnail captureId={capture.id} />
+                        <span className="timeline-card__meta">
+                          <strong>
+                            {formatTime(capture.capturedAtUtc)}
+                          </strong>
+                          <small>
+                            {formatBytes(capture.fileSize)} · 本地图片
+                          </small>
+                        </span>
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             </section>
           ))}
@@ -500,6 +790,58 @@ export function TimelinePage() {
             {loading ? "正在载入…" : "加载更早的记录"}
           </button>
         </div>
+      )}
+
+      {(uploadConfirmation || uploadMessage) && (
+        <aside
+          aria-label="上传提示"
+          className="upload-toast-region"
+        >
+          {uploadConfirmation && (
+            <div
+              aria-labelledby="upload-confirmation-title"
+              className="upload-confirmation-toast"
+              role="dialog"
+            >
+              <strong id="upload-confirmation-title">上传所选原图？</strong>
+              <p>
+                将 {uploadConfirmation.captureIds.length} 张原图（
+                {formatBytes(uploadConfirmation.totalBytes)}
+                ）上传到已配置的个人服务器文件夹。
+              </p>
+              <div className="upload-confirmation-toast__actions">
+                <button
+                  className="button button--ghost"
+                  onClick={() => setUploadConfirmation(null)}
+                  type="button"
+                >
+                  取消
+                </button>
+                <button
+                  className="button button--primary"
+                  onClick={() => void startConfirmedUpload()}
+                  type="button"
+                >
+                  确认上传
+                </button>
+              </div>
+            </div>
+          )}
+          {uploadMessage && (
+            <div className="upload-progress-toast" role="status">
+              <span>{uploadMessage}</span>
+              {!uploadActive && (
+                <button
+                  aria-label="关闭上传提示"
+                  onClick={() => setUploadMessage(null)}
+                  type="button"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          )}
+        </aside>
       )}
 
       {contextMenu && (
@@ -521,6 +863,18 @@ export function TimelinePage() {
             type="button"
           >
             查看原图
+          </button>
+          <button
+            onClick={() => {
+              toggleCaptureSelection(contextMenu.capture.id);
+              setContextMenu(null);
+            }}
+            role="menuitem"
+            type="button"
+          >
+            {selectedIds.has(contextMenu.capture.id)
+              ? "取消选择"
+              : "选择用于上传"}
           </button>
           <button
             className="is-danger"

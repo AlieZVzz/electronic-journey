@@ -6,6 +6,7 @@ mod error;
 mod privacy;
 mod scheduler;
 mod timeline;
+mod upload;
 mod vault;
 
 use std::{sync::OnceLock, time::Instant};
@@ -60,6 +61,7 @@ pub fn run() {
     STARTUP_STARTED.get_or_init(Instant::now);
     trace_startup("process entered");
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(RuntimeState::default())
         .setup(|app| {
             trace_startup("setup entered");
@@ -82,14 +84,22 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_snapshot,
+            commands::get_active_upload_batch,
+            commands::get_remote_profile,
+            commands::get_upload_batch_status,
             commands::delete_timeline_capture,
             commands::list_timeline_captures,
+            commands::pick_private_key_file,
             commands::read_timeline_capture,
             commands::read_timeline_thumbnail,
+            commands::probe_remote_host_key,
             commands::refresh_screen_capture_permission,
             commands::request_screen_capture_permission,
             commands::set_recording_state,
+            commands::save_remote_profile,
+            commands::test_remote_profile,
             commands::update_capture_settings,
+            commands::upload_selected_captures,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Electronic Journey");

@@ -5,8 +5,8 @@
 Electronic Journey is a local-first Windows and macOS desktop application
 for recording a user's own digital journey. Captures must be visible,
 consensual, stored locally, and recoverable after interruption. Images leave
-the device only when the user explicitly selects them and confirms a request
-from the Rust client to a configured LLM provider.
+the device only when the user explicitly selects them and confirms an SFTP
+upload from the Rust client to a configured personal server folder.
 
 Core goals:
 
@@ -14,7 +14,8 @@ Core goals:
 - Keep screenshot, key, filesystem, database, and network access behind narrow
   Rust interfaces and Tauri commands.
 - Do not build or use a first-party image cloud, object store, or LLM proxy.
-- Keep LLM credentials and image network access behind narrow Rust interfaces.
+- Keep SSH credentials and image network access behind narrow Rust interfaces.
+- Do not make the client aware of Hermes, prompts, models, or remote consumers.
 
 ## Technology
 
@@ -22,7 +23,7 @@ Core goals:
 - UI: React 19, TypeScript, and Vite 6.
 - Local data: SQLite through `sqlx`.
 - Local images: lossless WebP originals and bounded WebP thumbnails.
-- LLM integration: Rust provider adapters with BYOK or per-user OAuth tokens.
+- Remote upload: Rust SFTP with pinned host fingerprints and key authentication.
 - Package manager: npm.
 
 ## Commands
@@ -44,10 +45,10 @@ Rust and platform development prerequisites are listed in `README.md`.
 - Prefer small scoped changes and preserve public interfaces unless the task
   explicitly changes them.
 - Treat authentication, credentials, permissions, data
-  deletion, migrations, update signing, and LLM request behavior as
+  deletion, migrations, update signing, and SFTP upload behavior as
   security-sensitive. Propose the design and test strategy before changing
   them.
-- Do not claim a screenshot, LLM request, deletion, or recovery operation succeeded
+- Do not claim a screenshot, upload, deletion, or recovery operation succeeded
   until its documented verification step has passed.
 - Add focused tests for new business logic and regression tests for bugs.
 - Run the smallest relevant checks, then `scripts/check.sh` when practical.
@@ -59,7 +60,8 @@ Rust and platform development prerequisites are listed in `README.md`.
   authorization headers, screenshots, prompts, full model answers, or
   plaintext thumbnail data.
 - Never add analytics, remote fonts, remote images, or new outbound requests
-  except an explicitly approved LLM provider request with privacy review.
+  except a user-initiated SSH/SFTP action covered by the product design and
+  privacy review.
 - Never allow the frontend arbitrary filesystem, shell, screenshot, or network
   access. Use minimal Tauri capabilities and validated commands.
 - Do not silently weaken TLS, key storage, update

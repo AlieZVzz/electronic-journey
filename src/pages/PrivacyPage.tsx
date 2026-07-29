@@ -19,8 +19,13 @@ export function PrivacyPage({
 
   return (
     <section className="placeholder-page">
-      <h1>隐私中心</h1>
-      <p>控制记录频率与空闲策略；原图始终按捕获分辨率无损保存。</p>
+      <header className="page-header">
+        <div>
+          <p className="eyebrow">LOCAL · PRIVACY CONTROLS</p>
+          <h1>隐私中心</h1>
+          <p>控制记录频率与空闲策略；原图始终按捕获分辨率无损保存。</p>
+        </div>
+      </header>
 
       <div className="settings-panel">
         <label>

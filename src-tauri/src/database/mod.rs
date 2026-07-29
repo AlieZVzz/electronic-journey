@@ -8,6 +8,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const MAX_TIMELINE_PAGE_SIZE: u16 = 50;
+const MAX_UPLOAD_BATCH_SIZE: usize = 500;
 
 #[derive(Debug, Error)]
 pub enum DatabaseError {
@@ -17,10 +18,14 @@ pub enum DatabaseError {
     Migration(#[from] MigrateError),
     #[error("database contains an invalid capture size")]
     InvalidFileSize,
-    #[error("capture is still referenced by an AI task")]
-    CaptureInUse,
+    #[error("capture has an upload in progress")]
+    CaptureUploadInProgress,
     #[error("capture does not exist")]
     CaptureNotFound,
+    #[error("upload selection is invalid")]
+    InvalidUploadSelection,
+    #[error("another upload batch is already active")]
+    UploadAlreadyInProgress,
 }
 
 pub async fn connect(path: &Path) -> Result<SqlitePool, DatabaseError> {
@@ -37,7 +42,47 @@ pub async fn connect(path: &Path) -> Result<SqlitePool, DatabaseError> {
         .await?;
 
     sqlx::migrate!("./migrations").run(&pool).await?;
+    recover_interrupted_uploads(&pool).await?;
     Ok(pool)
+}
+
+async fn recover_interrupted_uploads(pool: &SqlitePool) -> Result<(), DatabaseError> {
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        r#"
+        UPDATE upload_items
+        SET state = 'failed', last_error_code = 'interrupted', updated_at_utc = ?
+        WHERE state IN ('pending', 'uploading')
+        "#,
+    )
+    .bind(&now)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE upload_batches
+        SET
+            state = 'partial_failed',
+            completed_items = (
+                SELECT COUNT(*) FROM upload_items
+                WHERE upload_items.batch_id = upload_batches.id
+                  AND upload_items.state = 'uploaded'
+            ),
+            failed_items = (
+                SELECT COUNT(*) FROM upload_items
+                WHERE upload_items.batch_id = upload_batches.id
+                  AND upload_items.state = 'failed'
+            ),
+            updated_at_utc = ?
+        WHERE state IN ('pending', 'uploading')
+        "#,
+    )
+    .bind(&now)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 pub struct NewCaptureRecord<'a> {
@@ -146,11 +191,21 @@ pub async fn capture_ids(pool: &SqlitePool) -> Result<HashSet<String>, DatabaseE
     Ok(ids.into_iter().collect())
 }
 
+pub async fn active_upload_count(pool: &SqlitePool) -> Result<u32, DatabaseError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM upload_items WHERE state IN ('pending', 'uploading')",
+    )
+    .fetch_one(pool)
+    .await?;
+    u32::try_from(count).map_err(|_| DatabaseError::InvalidUploadSelection)
+}
+
 #[derive(Debug, FromRow)]
 struct CaptureSummaryRow {
     id: String,
     captured_at_utc: DateTime<Utc>,
     file_size: i64,
+    upload_state: String,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +213,7 @@ pub struct CaptureSummary {
     pub id: String,
     pub captured_at_utc: DateTime<Utc>,
     pub file_size: u64,
+    pub upload_state: String,
 }
 
 pub struct CaptureSummaryPage {
@@ -176,7 +232,17 @@ pub async fn list_capture_summaries(
     let query_limit = i64::from(limit) + 1;
     let rows = sqlx::query_as::<_, CaptureSummaryRow>(
         r#"
-        SELECT id, captured_at_utc, file_size
+        SELECT
+            captures.id,
+            captures.captured_at_utc,
+            captures.file_size,
+            COALESCE((
+                SELECT upload_items.state
+                FROM upload_items
+                WHERE upload_items.capture_id = captures.id
+                ORDER BY upload_items.created_at_utc DESC, upload_items.id DESC
+                LIMIT 1
+            ), 'not_uploaded') AS upload_state
         FROM captures
         ORDER BY captured_at_utc DESC, id DESC
         LIMIT ? OFFSET ?
@@ -194,6 +260,7 @@ pub async fn list_capture_summaries(
             id: row.id,
             captured_at_utc: row.captured_at_utc,
             file_size: u64::try_from(row.file_size).map_err(|_| DatabaseError::InvalidFileSize)?,
+            upload_state: row.upload_state,
         });
     }
     let next_offset = has_more.then_some(offset.saturating_add(items.len() as u32));
@@ -241,13 +308,14 @@ pub async fn capture_file(
 
 pub async fn delete_capture(pool: &SqlitePool, capture_id: Uuid) -> Result<(), DatabaseError> {
     let mut transaction = pool.begin().await?;
-    let linked_jobs: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM ai_job_captures WHERE capture_id = ?")
+    let active_uploads: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM upload_items WHERE capture_id = ? AND state IN ('pending', 'uploading')",
+    )
             .bind(capture_id.to_string())
             .fetch_one(&mut *transaction)
             .await?;
-    if linked_jobs > 0 {
-        return Err(DatabaseError::CaptureInUse);
+    if active_uploads > 0 {
+        return Err(DatabaseError::CaptureUploadInProgress);
     }
 
     let result = sqlx::query("DELETE FROM captures WHERE id = ?")
@@ -257,6 +325,417 @@ pub async fn delete_capture(pool: &SqlitePool, capture_id: Uuid) -> Result<(), D
     if result.rows_affected() != 1 {
         return Err(DatabaseError::CaptureNotFound);
     }
+    transaction.commit().await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct RemoteProfileRecord {
+    pub name: String,
+    pub host: String,
+    pub port: i64,
+    pub username: String,
+    pub private_key_path: String,
+    pub host_key_fingerprint: String,
+    pub remote_root: String,
+    pub has_passphrase: bool,
+}
+
+pub struct SaveRemoteProfile<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub host: &'a str,
+    pub port: u16,
+    pub username: &'a str,
+    pub private_key_path: &'a str,
+    pub host_key_fingerprint: &'a str,
+    pub remote_root: &'a str,
+    pub has_passphrase: bool,
+}
+
+pub async fn save_remote_profile(
+    pool: &SqlitePool,
+    profile: &SaveRemoteProfile<'_>,
+) -> Result<(), DatabaseError> {
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query(
+        r#"
+        INSERT INTO remote_profiles (
+            id, name, host, port, username, private_key_path,
+            host_key_fingerprint, remote_root, has_passphrase,
+            created_at_utc, updated_at_utc
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            host = excluded.host,
+            port = excluded.port,
+            username = excluded.username,
+            private_key_path = excluded.private_key_path,
+            host_key_fingerprint = excluded.host_key_fingerprint,
+            remote_root = excluded.remote_root,
+            has_passphrase = excluded.has_passphrase,
+            updated_at_utc = excluded.updated_at_utc
+        "#,
+    )
+    .bind(profile.id)
+    .bind(profile.name)
+    .bind(profile.host)
+    .bind(i64::from(profile.port))
+    .bind(profile.username)
+    .bind(profile.private_key_path)
+    .bind(profile.host_key_fingerprint)
+    .bind(profile.remote_root)
+    .bind(profile.has_passphrase)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn remote_profile(
+    pool: &SqlitePool,
+    profile_id: &str,
+) -> Result<Option<RemoteProfileRecord>, DatabaseError> {
+    sqlx::query_as(
+        r#"
+        SELECT
+            name, host, port, username, private_key_path,
+            host_key_fingerprint, remote_root, has_passphrase
+        FROM remote_profiles
+        WHERE id = ?
+        "#,
+    )
+    .bind(profile_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(Into::into)
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct UploadItemRecord {
+    pub id: String,
+    pub capture_id: String,
+    pub remote_path: String,
+    pub file_size: i64,
+    pub content_sha256: String,
+    pub local_path: String,
+}
+
+pub struct NewUploadBatch {
+    pub id: Uuid,
+}
+
+pub async fn create_upload_batch(
+    pool: &SqlitePool,
+    profile_id: &str,
+    capture_ids: &[Uuid],
+) -> Result<NewUploadBatch, DatabaseError> {
+    let unique_ids: HashSet<_> = capture_ids.iter().copied().collect();
+    if unique_ids.is_empty()
+        || unique_ids.len() != capture_ids.len()
+        || unique_ids.len() > MAX_UPLOAD_BATCH_SIZE
+    {
+        return Err(DatabaseError::InvalidUploadSelection);
+    }
+
+    let batch_id = Uuid::new_v4();
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut transaction = pool.begin().await?;
+    let active_batches: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM upload_batches WHERE state IN ('pending', 'uploading')",
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+    if active_batches > 0 {
+        return Err(DatabaseError::UploadAlreadyInProgress);
+    }
+    let mut total_bytes = 0_u64;
+    let mut captures = Vec::with_capacity(capture_ids.len());
+    for capture_id in capture_ids {
+        let row: Option<(DateTime<Utc>, i64, String)> = sqlx::query_as(
+            "SELECT captured_at_utc, file_size, content_sha256 FROM captures WHERE id = ?",
+        )
+        .bind(capture_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some((captured_at_utc, file_size, content_sha256)) = row else {
+            return Err(DatabaseError::CaptureNotFound);
+        };
+        let file_size = u64::try_from(file_size).map_err(|_| DatabaseError::InvalidFileSize)?;
+        total_bytes = total_bytes.saturating_add(file_size);
+        captures.push((capture_id, captured_at_utc, file_size, content_sha256));
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO upload_batches (
+            id, profile_id, state, total_items, total_bytes,
+            completed_items, failed_items, created_at_utc, updated_at_utc
+        )
+        VALUES (?, ?, 'pending', ?, ?, 0, 0, ?, ?)
+        "#,
+    )
+    .bind(batch_id.to_string())
+    .bind(profile_id)
+    .bind(i64::try_from(captures.len()).map_err(|_| DatabaseError::InvalidUploadSelection)?)
+    .bind(i64::try_from(total_bytes).map_err(|_| DatabaseError::InvalidFileSize)?)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *transaction)
+    .await?;
+
+    for (capture_id, captured_at_utc, file_size, content_sha256) in captures {
+        let date_path = captured_at_utc.format("%Y/%m/%d");
+        let timestamp = captured_at_utc.format("%Y%m%dT%H%M%S%3fZ");
+        let remote_path = format!("{date_path}/{timestamp}_{capture_id}.webp");
+        sqlx::query(
+            r#"
+            INSERT INTO upload_items (
+                id, batch_id, capture_id, remote_path, file_size,
+                content_sha256, state, attempt_count,
+                created_at_utc, updated_at_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+            "#,
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(batch_id.to_string())
+        .bind(capture_id.to_string())
+        .bind(remote_path)
+        .bind(i64::try_from(file_size).map_err(|_| DatabaseError::InvalidFileSize)?)
+        .bind(content_sha256)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(NewUploadBatch { id: batch_id })
+}
+
+pub async fn upload_batch_items(
+    pool: &SqlitePool,
+    batch_id: Uuid,
+) -> Result<Vec<UploadItemRecord>, DatabaseError> {
+    sqlx::query_as(
+        r#"
+        SELECT
+            upload_items.id,
+            upload_items.capture_id,
+            upload_items.remote_path,
+            upload_items.file_size,
+            upload_items.content_sha256,
+            captures.local_path
+        FROM upload_items
+        JOIN captures ON captures.id = upload_items.capture_id
+        WHERE upload_items.batch_id = ?
+        ORDER BY upload_items.created_at_utc, upload_items.id
+        "#,
+    )
+    .bind(batch_id.to_string())
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
+}
+
+pub async fn start_upload_batch(pool: &SqlitePool, batch_id: Uuid) -> Result<(), DatabaseError> {
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query("UPDATE upload_batches SET state = 'uploading', updated_at_utc = ? WHERE id = ?")
+        .bind(now)
+        .bind(batch_id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_upload_item_state(
+    pool: &SqlitePool,
+    item_id: &str,
+    state: &str,
+    error_code: Option<&str>,
+) -> Result<(), DatabaseError> {
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query(
+        r#"
+        UPDATE upload_items
+        SET
+            state = ?,
+            attempt_count = attempt_count + CASE WHEN ? = 'uploading' THEN 1 ELSE 0 END,
+            last_error_code = ?,
+            updated_at_utc = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(state)
+    .bind(state)
+    .bind(error_code)
+    .bind(now)
+    .bind(item_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn finish_upload_batch(
+    pool: &SqlitePool,
+    batch_id: Uuid,
+    completed_items: usize,
+    failed_items: usize,
+) -> Result<(), DatabaseError> {
+    let state = if failed_items == 0 {
+        "completed"
+    } else {
+        "partial_failed"
+    };
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query(
+        r#"
+        UPDATE upload_batches
+        SET
+            state = ?,
+            completed_items = ?,
+            failed_items = ?,
+            updated_at_utc = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(state)
+    .bind(i64::try_from(completed_items).map_err(|_| DatabaseError::InvalidUploadSelection)?)
+    .bind(i64::try_from(failed_items).map_err(|_| DatabaseError::InvalidUploadSelection)?)
+    .bind(now)
+    .bind(batch_id.to_string())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct UploadBatchStatusRecord {
+    pub id: String,
+    pub state: String,
+    pub total_items: i64,
+    pub total_bytes: i64,
+    pub completed_items: i64,
+    pub failed_items: i64,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct UploadItemStatusRecord {
+    pub capture_id: String,
+    pub state: String,
+    pub last_error_code: Option<String>,
+}
+
+pub struct UploadBatchStatus {
+    pub batch: UploadBatchStatusRecord,
+    pub items: Vec<UploadItemStatusRecord>,
+}
+
+pub async fn upload_batch_status(
+    pool: &SqlitePool,
+    batch_id: Uuid,
+) -> Result<Option<UploadBatchStatus>, DatabaseError> {
+    let batch = sqlx::query_as::<_, UploadBatchStatusRecord>(
+        r#"
+        SELECT
+            id,
+            state,
+            total_items,
+            total_bytes,
+            (
+                SELECT COUNT(*) FROM upload_items
+                WHERE upload_items.batch_id = upload_batches.id
+                  AND upload_items.state = 'uploaded'
+            ) AS completed_items,
+            (
+                SELECT COUNT(*) FROM upload_items
+                WHERE upload_items.batch_id = upload_batches.id
+                  AND upload_items.state = 'failed'
+            ) AS failed_items
+        FROM upload_batches
+        WHERE id = ?
+        "#,
+    )
+    .bind(batch_id.to_string())
+    .fetch_optional(pool)
+    .await?;
+    let Some(batch) = batch else {
+        return Ok(None);
+    };
+    let items = sqlx::query_as::<_, UploadItemStatusRecord>(
+        r#"
+        SELECT capture_id, state, last_error_code
+        FROM upload_items
+        WHERE batch_id = ?
+        ORDER BY created_at_utc, id
+        "#,
+    )
+    .bind(batch_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(Some(UploadBatchStatus { batch, items }))
+}
+
+pub async fn active_upload_batch_id(pool: &SqlitePool) -> Result<Option<Uuid>, DatabaseError> {
+    let id: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM upload_batches
+        WHERE state IN ('pending', 'uploading')
+        ORDER BY created_at_utc DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+    id.map(|value| Uuid::parse_str(&value).map_err(|_| DatabaseError::InvalidUploadSelection))
+        .transpose()
+}
+
+pub async fn fail_active_upload_batch(
+    pool: &SqlitePool,
+    batch_id: Uuid,
+    error_code: &str,
+) -> Result<(), DatabaseError> {
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        r#"
+        UPDATE upload_items
+        SET state = 'failed', last_error_code = ?, updated_at_utc = ?
+        WHERE batch_id = ? AND state IN ('pending', 'uploading')
+        "#,
+    )
+    .bind(error_code)
+    .bind(&now)
+    .bind(batch_id.to_string())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE upload_batches
+        SET
+            state = 'partial_failed',
+            completed_items = (
+                SELECT COUNT(*) FROM upload_items
+                WHERE upload_items.batch_id = upload_batches.id
+                  AND upload_items.state = 'uploaded'
+            ),
+            failed_items = (
+                SELECT COUNT(*) FROM upload_items
+                WHERE upload_items.batch_id = upload_batches.id
+                  AND upload_items.state = 'failed'
+            ),
+            updated_at_utc = ?
+        WHERE id = ? AND state IN ('pending', 'uploading')
+        "#,
+    )
+    .bind(&now)
+    .bind(batch_id.to_string())
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
     Ok(())
 }
@@ -326,7 +805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_schema_has_no_legacy_capture_or_upload_columns() {
+    async fn fresh_schema_replaces_ai_jobs_with_upload_queue() {
         let pool = migrated_memory_pool().await;
         let columns: Vec<(String,)> =
             sqlx::query_as("SELECT name FROM pragma_table_info('captures')")
@@ -345,11 +824,18 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(upload_tables.0, 0);
+        assert_eq!(upload_tables.0, 2);
+        let ai_tables: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'ai_%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ai_tables.0, 0);
     }
 
     #[tokio::test]
-    async fn deletion_rejects_linked_captures_and_verifies_the_removed_record() {
+    async fn deletion_waits_for_active_upload_but_keeps_finished_history() {
         let pool = migrated_memory_pool().await;
         let capture_id = Uuid::new_v4();
         let captured_at = DateTime::parse_from_rfc3339("2026-07-29T02:00:00Z")
@@ -358,41 +844,214 @@ mod tests {
         insert_capture(&pool, &record(capture_id, captured_at))
             .await
             .unwrap();
-        sqlx::query(
-            r#"
-            INSERT INTO ai_jobs (
-                id, provider, model, question, state, created_at_utc, updated_at_utc
-            )
-            VALUES ('job', 'provider', 'model', 'question', 'completed', ?, ?)
-            "#,
+        save_remote_profile(
+            &pool,
+            &SaveRemoteProfile {
+                id: "primary",
+                name: "Personal server",
+                host: "example.test",
+                port: 22,
+                username: "journey",
+                private_key_path: "/Users/test/.ssh/id_ed25519",
+                host_key_fingerprint: "SHA256:test",
+                remote_root: "/srv/journey",
+                has_passphrase: false,
+            },
         )
-        .bind(captured_at)
-        .bind(captured_at)
-        .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
-            "INSERT INTO ai_job_captures (job_id, capture_id, ordinal) VALUES ('job', ?, 0)",
-        )
-        .bind(capture_id.to_string())
-        .execute(&pool)
-        .await
-        .unwrap();
+        let batch = create_upload_batch(&pool, "primary", &[capture_id])
+            .await
+            .unwrap();
+        let item = upload_batch_items(&pool, batch.id).await.unwrap().remove(0);
 
         assert!(matches!(
             delete_capture(&pool, capture_id).await,
-            Err(DatabaseError::CaptureInUse)
+            Err(DatabaseError::CaptureUploadInProgress)
         ));
-        sqlx::query("DELETE FROM ai_job_captures WHERE capture_id = ?")
-            .bind(capture_id.to_string())
-            .execute(&pool)
+        set_upload_item_state(&pool, &item.id, "uploaded", None)
             .await
             .unwrap();
+        finish_upload_batch(&pool, batch.id, 1, 0).await.unwrap();
         delete_capture(&pool, capture_id).await.unwrap();
         assert!(capture_file(&pool, capture_id).await.unwrap().is_none());
+        let history: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM upload_items WHERE capture_id = ?")
+                .bind(capture_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(history.0, 1);
         assert!(matches!(
             delete_capture(&pool, capture_id).await,
             Err(DatabaseError::CaptureNotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn upload_batch_has_stable_date_paths_and_rejects_duplicates() {
+        let pool = migrated_memory_pool().await;
+        let capture_id = Uuid::new_v4();
+        let captured_at = DateTime::parse_from_rfc3339("2026-07-29T02:03:04.567Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        insert_capture(&pool, &record(capture_id, captured_at))
+            .await
+            .unwrap();
+        save_remote_profile(
+            &pool,
+            &SaveRemoteProfile {
+                id: "primary",
+                name: "Personal server",
+                host: "example.test",
+                port: 22,
+                username: "journey",
+                private_key_path: "/Users/test/.ssh/id_ed25519",
+                host_key_fingerprint: "SHA256:test",
+                remote_root: "/srv/journey",
+                has_passphrase: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let batch = create_upload_batch(&pool, "primary", &[capture_id])
+            .await
+            .unwrap();
+        let item = upload_batch_items(&pool, batch.id).await.unwrap().remove(0);
+        assert_eq!(
+            item.remote_path,
+            format!("2026/07/29/20260729T020304567Z_{capture_id}.webp")
+        );
+        assert!(matches!(
+            create_upload_batch(&pool, "primary", &[capture_id, capture_id]).await,
+            Err(DatabaseError::InvalidUploadSelection)
+        ));
+    }
+
+    #[tokio::test]
+    async fn upload_queue_allows_only_one_active_batch_and_reports_live_progress() {
+        let pool = migrated_memory_pool().await;
+        let first_capture_id = Uuid::new_v4();
+        let second_capture_id = Uuid::new_v4();
+        let captured_at = DateTime::parse_from_rfc3339("2026-07-29T02:03:04Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut first_capture = record(first_capture_id, captured_at);
+        first_capture.local_path = "captures/first.webp";
+        let mut second_capture = record(second_capture_id, captured_at);
+        second_capture.local_path = "captures/second.webp";
+        insert_capture(&pool, &first_capture).await.unwrap();
+        insert_capture(&pool, &second_capture).await.unwrap();
+        save_remote_profile(
+            &pool,
+            &SaveRemoteProfile {
+                id: "primary",
+                name: "Personal server",
+                host: "example.test",
+                port: 22,
+                username: "journey",
+                private_key_path: "/Users/test/.ssh/id_ed25519",
+                host_key_fingerprint: "SHA256:test",
+                remote_root: "/srv/journey",
+                has_passphrase: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let batch = create_upload_batch(&pool, "primary", &[first_capture_id, second_capture_id])
+            .await
+            .unwrap();
+        assert_eq!(active_upload_batch_id(&pool).await.unwrap(), Some(batch.id));
+        assert!(matches!(
+            create_upload_batch(&pool, "primary", &[first_capture_id]).await,
+            Err(DatabaseError::UploadAlreadyInProgress)
+        ));
+
+        start_upload_batch(&pool, batch.id).await.unwrap();
+        let items = upload_batch_items(&pool, batch.id).await.unwrap();
+        set_upload_item_state(&pool, &items[0].id, "uploading", None)
+            .await
+            .unwrap();
+        set_upload_item_state(&pool, &items[0].id, "uploaded", None)
+            .await
+            .unwrap();
+        let progress = upload_batch_status(&pool, batch.id).await.unwrap().unwrap();
+        assert_eq!(progress.batch.state, "uploading");
+        assert_eq!(progress.batch.completed_items, 1);
+        assert_eq!(progress.batch.failed_items, 0);
+
+        fail_active_upload_batch(&pool, batch.id, "connection")
+            .await
+            .unwrap();
+        let progress = upload_batch_status(&pool, batch.id).await.unwrap().unwrap();
+        assert_eq!(progress.batch.state, "partial_failed");
+        assert_eq!(progress.batch.completed_items, 1);
+        assert_eq!(progress.batch.failed_items, 1);
+        assert_eq!(
+            progress.items[1].last_error_code.as_deref(),
+            Some("connection")
+        );
+        assert_eq!(active_upload_batch_id(&pool).await.unwrap(), None);
+
+        create_upload_batch(&pool, "primary", &[first_capture_id])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_fails_active_items_without_replaying_network_work() {
+        let pool = migrated_memory_pool().await;
+        let capture_id = Uuid::new_v4();
+        let captured_at = DateTime::parse_from_rfc3339("2026-07-29T02:03:04Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        insert_capture(&pool, &record(capture_id, captured_at))
+            .await
+            .unwrap();
+        save_remote_profile(
+            &pool,
+            &SaveRemoteProfile {
+                id: "primary",
+                name: "Personal server",
+                host: "example.test",
+                port: 22,
+                username: "journey",
+                private_key_path: "/Users/test/.ssh/id_ed25519",
+                host_key_fingerprint: "SHA256:test",
+                remote_root: "/srv/journey",
+                has_passphrase: false,
+            },
+        )
+        .await
+        .unwrap();
+        let batch = create_upload_batch(&pool, "primary", &[capture_id])
+            .await
+            .unwrap();
+        start_upload_batch(&pool, batch.id).await.unwrap();
+        let item = upload_batch_items(&pool, batch.id).await.unwrap().remove(0);
+        set_upload_item_state(&pool, &item.id, "uploading", None)
+            .await
+            .unwrap();
+
+        recover_interrupted_uploads(&pool).await.unwrap();
+
+        let item_state: (String, Option<String>) =
+            sqlx::query_as("SELECT state, last_error_code FROM upload_items WHERE id = ?")
+                .bind(item.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(item_state.0, "failed");
+        assert_eq!(item_state.1.as_deref(), Some("interrupted"));
+        let batch_state: (String, i64) =
+            sqlx::query_as("SELECT state, failed_items FROM upload_batches WHERE id = ?")
+                .bind(batch.id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(batch_state, ("partial_failed".to_string(), 1));
+        delete_capture(&pool, capture_id).await.unwrap();
     }
 }

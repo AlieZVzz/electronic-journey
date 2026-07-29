@@ -1,16 +1,16 @@
 # Electronic Journey
 
-Electronic Journey 是一款面向个人用户的数字旅程记录工具。它将在用户明确授权并主动开启后，按计划截取所选显示器，在本机保存原图和缩略图，并计划支持由用户明确选择图片后从客户端直连 LLM 提供商。
+Electronic Journey 是一款面向个人用户的数字旅程记录工具。它将在用户明确授权并主动开启后，按计划截取所选显示器，在本机保存原图和缩略图，并支持由用户明确选择和确认后上传到个人 SFTP 文件夹。
 
-当前 macOS 原型已接通屏幕录制权限、主显示器截图、普通 WebP 与缩略图原子写入、SQLite 时间线和启动索引恢复。Windows 捕获、锁屏/休眠监听、托盘和客户端直连 LLM 仍待实现。
+当前 macOS 原型已接通屏幕录制权限、主显示器截图、普通 WebP 与缩略图原子写入、SQLite 时间线和启动索引恢复。个人 SFTP 配置、上传队列与手动选择界面已进入第一期实现；Windows 捕获、锁屏/休眠监听和托盘仍待实现。
 
 ## 技术栈
 
 - Tauri 2 + Rust
 - React 19 + TypeScript + Vite 6
 - SQLite + `sqlx`
-- macOS Keychain / Windows DPAPI（用于未来的 LLM 凭据）
-- Rust `reqwest`（用于未来的客户端 LLM 适配器）
+- macOS Keychain / Windows Credential Manager（用于私钥口令）
+- Rust `russh` 与 `russh-sftp`（用于固定主机指纹的个人服务器上传）
 
 ## 环境要求
 
@@ -31,7 +31,7 @@ scripts/init.sh
 
 ## 本地开发
 
-浏览器中运行界面（使用安全的本地演示状态，不执行截图、文件读取或 LLM 请求）：
+浏览器中运行界面（使用安全的本地演示状态，不执行截图、文件读取、远程连接或上传）：
 
 ```bash
 npm run dev
@@ -87,8 +87,9 @@ electronic-journey/
 - 新截图默认只在本机保存普通 WebP 原图和缩略图。
 - 不记录键盘、剪贴板、浏览器历史、麦克风或窗口文本。
 - 不建设自有图片云端、对象存储或 LLM 图片中转服务。
-- 未来只有在用户选择图片并确认后，Rust 客户端才会直连已配置的 LLM 提供商。
-- 当前版本不会把截图发送给任何 LLM 提供商。
+- 只有在用户选择图片并确认后，Rust 客户端才会通过 SFTP 上传到已配置的个人服务器文件夹。
+- 客户端不配置或感知远端 Hermes、提示词、模型和其他图片消费者。
+- 不提供自动上传开关。
 
 完整设计、阶段和验收标准见
 [`electronic-journey-design.md`](electronic-journey-design.md)。

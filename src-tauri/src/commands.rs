@@ -10,7 +10,7 @@ use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager, State};
-#[cfg(target_os = "macos")]
+use tauri_plugin_dialog::DialogExt;
 use zeroize::Zeroize;
 
 use crate::{
@@ -18,7 +18,7 @@ use crate::{
     capture_pipeline,
     error::AppError,
     scheduler::{next_capture_at, FIRST_CAPTURE_DELAY},
-    timeline,
+    timeline, upload,
 };
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
@@ -75,7 +75,7 @@ pub struct AppSnapshot {
     next_capture_at: Option<String>,
     today_count: u32,
     local_storage_bytes: u64,
-    pending_ai_jobs: u32,
+    pending_uploads: u32,
     permission_granted: bool,
     permission_state: PermissionState,
     last_error: Option<String>,
@@ -89,7 +89,7 @@ impl Default for AppSnapshot {
             next_capture_at: None,
             today_count: 0,
             local_storage_bytes: 0,
-            pending_ai_jobs: 0,
+            pending_uploads: 0,
             permission_granted: false,
             permission_state: PermissionState::NotDetermined,
             last_error: None,
@@ -366,9 +366,16 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
 }
 
 #[tauri::command]
-pub fn get_app_snapshot(state: State<'_, RuntimeState>) -> Result<AppSnapshot, String> {
+pub async fn get_app_snapshot(
+    state: State<'_, RuntimeState>,
+    pool: State<'_, SqlitePool>,
+) -> Result<AppSnapshot, String> {
     crate::trace_startup("cached snapshot requested");
-    state.snapshot().map_err(|error| error.to_string())
+    let mut snapshot = state.snapshot().map_err(|error| error.to_string())?;
+    snapshot.pending_uploads = crate::database::active_upload_count(pool.inner())
+        .await
+        .map_err(|_| "无法读取上传任务状态。".to_string())?;
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -521,8 +528,8 @@ pub async fn delete_timeline_capture(
             runtime.capture_deleted(deleted.captured_at_utc, deleted.storage_size);
             Ok(())
         }
-        Err(capture_pipeline::CapturePipelineError::CaptureInUse) => {
-            Err("这张截图仍关联 AI 任务，暂时不能删除。".to_string())
+        Err(capture_pipeline::CapturePipelineError::CaptureUploadInProgress) => {
+            Err("这张截图正在上传，请等待上传结束后再删除。".to_string())
         }
         Err(capture_pipeline::CapturePipelineError::CaptureNotFound) => {
             Err("截图不存在或已经被删除。".to_string())
@@ -532,6 +539,408 @@ pub async fn delete_timeline_capture(
         }
         Err(_) => Err("无法删除这张截图，本地文件和索引未确认全部移除。".to_string()),
     }
+}
+
+fn upload_error_message(error: &upload::UploadError) -> String {
+    match error {
+        upload::UploadError::InvalidProfile => "远程服务器配置无效。".to_string(),
+        upload::UploadError::InvalidKeyPath => {
+            "已保存的私钥路径发生变化，请重新选择私钥文件。".to_string()
+        }
+        upload::UploadError::InvalidKeyFile => {
+            "私钥文件无效、权限过宽，或无法使用提供的口令解锁。".to_string()
+        }
+        upload::UploadError::CredentialStore => "无法访问系统钥匙串。".to_string(),
+        upload::UploadError::Connection => "无法连接远程服务器。".to_string(),
+        upload::UploadError::HostKeyMismatch => {
+            "服务器主机指纹与已保存值不一致，已拒绝连接。".to_string()
+        }
+        upload::UploadError::Authentication => "SSH 私钥认证失败。".to_string(),
+        upload::UploadError::Sftp => "远程服务器的 SFTP 操作失败。".to_string(),
+        upload::UploadError::RemoteRoot => "远程文件夹不存在、不是目录或不可写。".to_string(),
+        upload::UploadError::RemoteCreate => {
+            "无法在远程文件夹创建临时文件，请检查目录属主和写权限。".to_string()
+        }
+        upload::UploadError::RemoteWrite => "远程临时文件写入失败。".to_string(),
+        upload::UploadError::RemoteFlush => {
+            "远程服务器未能确认文件写入，请检查 SFTP 服务兼容性。".to_string()
+        }
+        upload::UploadError::RemoteClose => {
+            "远程文件写入后无法正常关闭，请检查 SFTP 服务状态。".to_string()
+        }
+        upload::UploadError::RemoteInspect => {
+            "无法读取远程文件状态或文件长度验证失败。".to_string()
+        }
+        upload::UploadError::RemoteDelete => {
+            "测试文件已创建，但无法删除；请检查远程目录删除权限。".to_string()
+        }
+        upload::UploadError::RemoteRename => "临时文件已写入，但无法改名为最终文件。".to_string(),
+        upload::UploadError::RemoteCreateDirectory => {
+            "无法创建远程日期目录，请检查目标目录写权限。".to_string()
+        }
+        upload::UploadError::RemoteConflict => {
+            "远端已存在同名但大小不同的文件，未覆盖。".to_string()
+        }
+        upload::UploadError::InvalidCapture => "本地截图完整性校验失败，未上传。".to_string(),
+    }
+}
+
+fn upload_error_code(error: &upload::UploadError) -> &'static str {
+    match error {
+        upload::UploadError::InvalidProfile => "invalid_profile",
+        upload::UploadError::InvalidKeyPath => "invalid_key_path",
+        upload::UploadError::InvalidKeyFile => "invalid_key_file",
+        upload::UploadError::CredentialStore => "credential_store",
+        upload::UploadError::Connection => "connection",
+        upload::UploadError::HostKeyMismatch => "host_key_mismatch",
+        upload::UploadError::Authentication => "authentication",
+        upload::UploadError::Sftp => "sftp",
+        upload::UploadError::RemoteRoot => "remote_root",
+        upload::UploadError::RemoteCreate => "remote_create",
+        upload::UploadError::RemoteWrite => "remote_write",
+        upload::UploadError::RemoteFlush => "remote_flush",
+        upload::UploadError::RemoteClose => "remote_close",
+        upload::UploadError::RemoteInspect => "remote_inspect",
+        upload::UploadError::RemoteDelete => "remote_delete",
+        upload::UploadError::RemoteRename => "remote_rename",
+        upload::UploadError::RemoteCreateDirectory => "remote_create_directory",
+        upload::UploadError::RemoteConflict => "remote_conflict",
+        upload::UploadError::InvalidCapture => "invalid_capture",
+    }
+}
+
+#[tauri::command]
+pub async fn pick_private_key_file(app: AppHandle) -> Result<Option<String>, String> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("选择 SSH 私钥文件")
+        .blocking_pick_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|_| "选择的项目不是可用的本地文件。".to_string())?;
+    let canonical = upload::validate_selected_private_key(&app, &path)
+        .map_err(|error| upload_error_message(&error))?;
+    canonical
+        .to_str()
+        .map(|value| Some(value.to_string()))
+        .ok_or_else(|| "私钥路径无法显示。".to_string())
+}
+
+#[tauri::command]
+pub async fn get_remote_profile(
+    pool: State<'_, SqlitePool>,
+) -> Result<Option<upload::RemoteProfile>, String> {
+    crate::database::remote_profile(pool.inner(), upload::profile_id())
+        .await
+        .map_err(|_| "无法读取远程服务器配置。".to_string())?
+        .map(upload::RemoteProfile::try_from)
+        .transpose()
+        .map_err(|error| upload_error_message(&error))
+}
+
+#[tauri::command]
+pub async fn probe_remote_host_key(host: String, port: u16) -> Result<String, String> {
+    upload::probe_host_key(&host, port)
+        .await
+        .map_err(|error| upload_error_message(&error))
+}
+
+#[tauri::command]
+pub async fn save_remote_profile(
+    app: AppHandle,
+    pool: State<'_, SqlitePool>,
+    mut input: upload::SaveRemoteProfileInput,
+) -> Result<upload::RemoteProfile, String> {
+    let (private_key_path, remote_root) = upload::validate_profile_input(&app, &input)
+        .map_err(|error| upload_error_message(&error))?;
+    let previous = crate::database::remote_profile(pool.inner(), upload::profile_id())
+        .await
+        .map_err(|_| "无法读取现有远程服务器配置。".to_string())?;
+    let supplied_passphrase = input
+        .private_key_passphrase
+        .take()
+        .filter(|value| !value.is_empty());
+    let has_passphrase = supplied_passphrase.is_some()
+        || previous
+            .as_ref()
+            .is_some_and(|profile| profile.has_passphrase);
+    if let Some(passphrase) = supplied_passphrase {
+        upload::store_passphrase(passphrase)
+            .await
+            .map_err(|error| upload_error_message(&error))?;
+    }
+
+    crate::database::save_remote_profile(
+        pool.inner(),
+        &crate::database::SaveRemoteProfile {
+            id: upload::profile_id(),
+            name: input.name.trim(),
+            host: input.host.trim(),
+            port: input.port,
+            username: input.username.trim(),
+            private_key_path: private_key_path
+                .to_str()
+                .ok_or_else(|| "私钥路径无法保存。".to_string())?,
+            host_key_fingerprint: input.host_key_fingerprint.trim(),
+            remote_root: &remote_root,
+            has_passphrase,
+        },
+    )
+    .await
+    .map_err(|_| "无法保存远程服务器配置。".to_string())?;
+    let stored = crate::database::remote_profile(pool.inner(), upload::profile_id())
+        .await
+        .map_err(|_| "无法读取刚保存的配置。".to_string())?
+        .ok_or_else(|| "远程服务器配置没有保存成功。".to_string())?;
+    upload::RemoteProfile::try_from(stored).map_err(|error| upload_error_message(&error))
+}
+
+#[tauri::command]
+pub async fn test_remote_profile(
+    app: AppHandle,
+    pool: State<'_, SqlitePool>,
+) -> Result<upload::RemoteConnectionTest, String> {
+    let profile = crate::database::remote_profile(pool.inner(), upload::profile_id())
+        .await
+        .map_err(|_| "无法读取远程服务器配置。".to_string())?
+        .ok_or_else(|| "请先保存远程服务器配置。".to_string())?;
+    upload::validate_stored_profile(&app, &profile)
+        .map_err(|error| upload_error_message(&error))?;
+    let session = upload::RemoteSession::connect(&profile)
+        .await
+        .map_err(|error| upload_error_message(&error))?;
+    let result = session
+        .test_writable()
+        .await
+        .map_err(|error| upload_error_message(&error));
+    session.disconnect().await;
+    result
+}
+
+fn upload_error_message_from_code(code: &str) -> String {
+    match code {
+        "invalid_profile" => "远程服务器配置无效。",
+        "invalid_key_path" => "已保存的私钥路径发生变化，请重新选择私钥文件。",
+        "invalid_key_file" => "私钥文件无效、权限过宽或无法解锁。",
+        "credential_store" => "无法访问系统钥匙串。",
+        "connection" => "无法连接远程服务器。",
+        "host_key_mismatch" => "服务器主机指纹与已保存值不一致。",
+        "authentication" => "SSH 私钥认证失败。",
+        "sftp" => "远程服务器未能启动 SFTP。",
+        "remote_root" => "远程文件夹不存在、不是目录或不可写。",
+        "remote_create" => "无法在远程文件夹创建临时文件。",
+        "remote_write" => "远程临时文件写入失败。",
+        "remote_flush" => "远程服务器未确认文件写入。",
+        "remote_close" => "远程文件写入后无法正常关闭。",
+        "remote_inspect" => "无法读取远程文件状态或长度验证失败。",
+        "remote_delete" => "测试文件无法删除。",
+        "remote_rename" => "临时文件无法改名为最终文件。",
+        "remote_create_directory" => "无法创建远程日期目录。",
+        "remote_conflict" => "远端存在同名但大小不同的文件。",
+        "invalid_capture" => "本地截图完整性校验失败。",
+        "interrupted" => "应用上次退出时中断了上传。",
+        _ => "后台上传发生内部错误。",
+    }
+    .to_string()
+}
+
+fn upload_progress_from_record(
+    status: crate::database::UploadBatchStatus,
+) -> Result<upload::UploadBatchProgress, String> {
+    let last_error = status
+        .items
+        .iter()
+        .find_map(|item| item.last_error_code.as_deref())
+        .map(upload_error_message_from_code);
+    Ok(upload::UploadBatchProgress {
+        batch_id: status.batch.id,
+        state: status.batch.state,
+        total_items: usize::try_from(status.batch.total_items)
+            .map_err(|_| "上传批次数量无效。".to_string())?,
+        total_bytes: u64::try_from(status.batch.total_bytes)
+            .map_err(|_| "上传批次大小无效。".to_string())?,
+        uploaded_items: usize::try_from(status.batch.completed_items)
+            .map_err(|_| "上传完成数量无效。".to_string())?,
+        failed_items: usize::try_from(status.batch.failed_items)
+            .map_err(|_| "上传失败数量无效。".to_string())?,
+        items: status
+            .items
+            .into_iter()
+            .map(|item| upload::UploadItemProgress {
+                capture_id: item.capture_id,
+                state: item.state,
+            })
+            .collect(),
+        last_error,
+    })
+}
+
+async fn load_upload_progress(
+    pool: &SqlitePool,
+    batch_id: uuid::Uuid,
+) -> Result<upload::UploadBatchProgress, String> {
+    let status = crate::database::upload_batch_status(pool, batch_id)
+        .await
+        .map_err(|_| "无法读取后台上传状态。".to_string())?
+        .ok_or_else(|| "上传批次不存在。".to_string())?;
+    upload_progress_from_record(status)
+}
+
+async fn run_upload_batch(
+    app: AppHandle,
+    pool: SqlitePool,
+    profile: crate::database::RemoteProfileRecord,
+    batch_id: uuid::Uuid,
+) -> Result<(), ()> {
+    crate::database::start_upload_batch(&pool, batch_id)
+        .await
+        .map_err(|_| ())?;
+    let items = crate::database::upload_batch_items(&pool, batch_id)
+        .await
+        .map_err(|_| ())?;
+    let session = match upload::RemoteSession::connect(&profile).await {
+        Ok(session) => session,
+        Err(error) => {
+            crate::database::fail_active_upload_batch(&pool, batch_id, upload_error_code(&error))
+                .await
+                .map_err(|_| ())?;
+            return Ok(());
+        }
+    };
+
+    let mut uploaded_items = 0_usize;
+    let mut failed_items = 0_usize;
+    for item in items {
+        crate::database::set_upload_item_state(&pool, &item.id, "uploading", None)
+            .await
+            .map_err(|_| ())?;
+        let capture_id = uuid::Uuid::parse_str(&item.capture_id).map_err(|_| ())?;
+        let record = crate::database::capture_file(&pool, capture_id)
+            .await
+            .map_err(|_| ())?;
+        let item_result = if let Some(record) = record {
+            if record.file_size != u64::try_from(item.file_size).unwrap_or(u64::MAX)
+                || record.content_sha256 != item.content_sha256
+                || record.local_path != item.local_path
+            {
+                Err(upload::UploadError::InvalidCapture)
+            } else {
+                let read_app = app.clone();
+                let read_result = tauri::async_runtime::spawn_blocking(move || {
+                    capture_pipeline::read_saved_capture(&read_app, capture_id, &record)
+                })
+                .await;
+                match read_result {
+                    Ok(Ok(mut bytes)) => {
+                        let result = session.upload(&item.remote_path, &bytes).await;
+                        bytes.zeroize();
+                        result
+                    }
+                    _ => Err(upload::UploadError::InvalidCapture),
+                }
+            }
+        } else {
+            Err(upload::UploadError::InvalidCapture)
+        };
+        match item_result {
+            Ok(()) => {
+                uploaded_items += 1;
+                crate::database::set_upload_item_state(&pool, &item.id, "uploaded", None)
+                    .await
+                    .map_err(|_| ())?;
+            }
+            Err(error) => {
+                failed_items += 1;
+                crate::database::set_upload_item_state(
+                    &pool,
+                    &item.id,
+                    "failed",
+                    Some(upload_error_code(&error)),
+                )
+                .await
+                .map_err(|_| ())?;
+            }
+        }
+    }
+    session.disconnect().await;
+    crate::database::finish_upload_batch(&pool, batch_id, uploaded_items, failed_items)
+        .await
+        .map_err(|_| ())
+}
+
+#[tauri::command]
+pub async fn upload_selected_captures(
+    app: AppHandle,
+    pool: State<'_, SqlitePool>,
+    capture_ids: Vec<String>,
+) -> Result<upload::UploadBatchProgress, String> {
+    let capture_ids = capture_ids
+        .iter()
+        .map(|capture_id| {
+            uuid::Uuid::parse_str(capture_id).map_err(|_| "截图选择中包含无效标识。".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let profile = crate::database::remote_profile(pool.inner(), upload::profile_id())
+        .await
+        .map_err(|_| "无法读取远程服务器配置。".to_string())?
+        .ok_or_else(|| "请先在“远程存储”中保存并测试服务器配置。".to_string())?;
+    upload::validate_stored_profile(&app, &profile)
+        .map_err(|error| upload_error_message(&error))?;
+    let batch =
+        crate::database::create_upload_batch(pool.inner(), upload::profile_id(), &capture_ids)
+            .await
+            .map_err(|error| match error {
+                crate::database::DatabaseError::InvalidUploadSelection => {
+                    "请选择 1 至 500 张不重复的截图。".to_string()
+                }
+                crate::database::DatabaseError::CaptureNotFound => {
+                    "选择中包含已经删除的截图，请刷新后重试。".to_string()
+                }
+                crate::database::DatabaseError::UploadAlreadyInProgress => {
+                    "已有一个后台上传批次正在运行。".to_string()
+                }
+                _ => "无法创建上传批次。".to_string(),
+            })?;
+    let progress = load_upload_progress(pool.inner(), batch.id).await?;
+    let background_pool = pool.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        if run_upload_batch(app, background_pool.clone(), profile, batch.id)
+            .await
+            .is_err()
+        {
+            let _ =
+                crate::database::fail_active_upload_batch(&background_pool, batch.id, "internal")
+                    .await;
+        }
+    });
+    Ok(progress)
+}
+
+#[tauri::command]
+pub async fn get_upload_batch_status(
+    pool: State<'_, SqlitePool>,
+    batch_id: String,
+) -> Result<upload::UploadBatchProgress, String> {
+    let batch_id =
+        uuid::Uuid::parse_str(&batch_id).map_err(|_| "上传批次标识无效。".to_string())?;
+    load_upload_progress(pool.inner(), batch_id).await
+}
+
+#[tauri::command]
+pub async fn get_active_upload_batch(
+    pool: State<'_, SqlitePool>,
+) -> Result<Option<upload::UploadBatchProgress>, String> {
+    let Some(batch_id) = crate::database::active_upload_batch_id(pool.inner())
+        .await
+        .map_err(|_| "无法读取后台上传状态。".to_string())?
+    else {
+        return Ok(None);
+    };
+    load_upload_progress(pool.inner(), batch_id).await.map(Some)
 }
 
 #[cfg(test)]

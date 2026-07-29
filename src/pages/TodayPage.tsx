@@ -133,6 +133,7 @@ export function TodayPage({
     <>
       <header className="page-header">
         <div>
+          <p className="eyebrow">LOCAL · DAILY OVERVIEW</p>
           <h1>今天</h1>
           <p>
             {new Intl.DateTimeFormat("zh-CN", {
@@ -196,10 +197,10 @@ export function TodayPage({
           value={formatBytes(snapshot.localStorageBytes)}
         />
         <MetricCard
-          detail="客户端直连功能待接入"
-          label="AI 任务"
+          detail="仅统计进行中的手动上传"
+          label="上传任务"
           tone="amber"
-          value={`${snapshot.pendingAiJobs} 项`}
+          value={`${snapshot.pendingUploads} 项`}
         />
       </section>
 

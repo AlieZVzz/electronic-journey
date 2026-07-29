@@ -74,7 +74,7 @@ export function FirstRunOnboarding({
                 <span>03</span>
                 <div>
                   <strong>当前采用安全默认值</strong>
-                  <p>首次记录会在开启 10 秒后执行；AI 分析必须由你选择图片并确认。</p>
+                  <p>首次记录会在开启 10 秒后执行；远程上传必须由你选择图片并确认。</p>
                 </div>
               </li>
             </ul>

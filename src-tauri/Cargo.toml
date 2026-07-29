@@ -20,11 +20,15 @@ chrono.workspace = true
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["webp"] }
 iana-time-zone = "0.1"
+keyring = "4.1.5"
+russh = "0.62.4"
+russh-sftp = "2.3.0"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 sqlx = { version = "0.8", features = ["chrono", "migrate", "runtime-tokio", "sqlite", "uuid"] }
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2.7.2"
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

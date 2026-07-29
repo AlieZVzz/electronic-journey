@@ -49,8 +49,8 @@ pub enum CapturePipelineError {
     InvalidContainer,
     #[error("capture index could not be updated")]
     Database,
-    #[error("capture is still referenced by an AI task")]
-    CaptureInUse,
+    #[error("capture has an upload in progress")]
+    CaptureUploadInProgress,
     #[error("capture does not exist")]
     CaptureNotFound,
     #[error("capture files could not be deleted")]
@@ -217,7 +217,9 @@ pub async fn delete_saved_capture(
     if let Err(error) = database::delete_capture(pool, capture_id).await {
         rollback_staged_files(&staged).await?;
         return Err(match error {
-            database::DatabaseError::CaptureInUse => CapturePipelineError::CaptureInUse,
+            database::DatabaseError::CaptureUploadInProgress => {
+                CapturePipelineError::CaptureUploadInProgress
+            }
             database::DatabaseError::CaptureNotFound => CapturePipelineError::CaptureNotFound,
             _ => CapturePipelineError::Database,
         });
@@ -460,9 +462,12 @@ fn inventory_directory(
 fn encode_webp_variants(
     captured: CapturedImage,
 ) -> Result<(Vec<u8>, Vec<u8>), CapturePipelineError> {
-    let image =
+    let mut image =
         ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(captured.width, captured.height, captured.rgba)
             .ok_or(CapturePipelineError::InvalidPixels)?;
+    for pixel in image.pixels_mut() {
+        pixel.0[3] = u8::MAX;
+    }
     let original = DynamicImage::ImageRgba8(image);
     let thumbnail = resize_to_max_width(original.clone(), THUMBNAIL_MAX_WIDTH);
     Ok((
@@ -548,6 +553,28 @@ mod tests {
         assert_eq!(decoded.height(), 2);
         assert_eq!(decoded_thumbnail.width(), 4);
         assert_eq!(decoded_thumbnail.height(), 2);
+    }
+
+    #[test]
+    fn encoding_makes_screen_captures_fully_opaque() {
+        let captured = CapturedImage {
+            width: 2,
+            height: 1,
+            rgba: vec![12, 34, 56, 0, 78, 90, 123, 128],
+        };
+        let (encoded, thumbnail) = encode_webp_variants(captured).unwrap();
+        let decoded = image::load_from_memory_with_format(&encoded, image::ImageFormat::WebP)
+            .unwrap()
+            .to_rgba8();
+        let decoded_thumbnail =
+            image::load_from_memory_with_format(&thumbnail, image::ImageFormat::WebP)
+                .unwrap()
+                .to_rgba8();
+
+        assert_eq!(decoded.as_raw(), &[12, 34, 56, 255, 78, 90, 123, 255]);
+        assert!(decoded_thumbnail
+            .pixels()
+            .all(|pixel| pixel.0[3] == u8::MAX));
     }
 
     #[test]

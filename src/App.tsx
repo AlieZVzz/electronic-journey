@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from "react";
+import { useState } from "react";
 
 import { desktopApi } from "./api/desktop";
 import { FirstRunOnboarding } from "./components/FirstRunOnboarding";
@@ -7,31 +7,18 @@ import {
   hasCompletedOnboarding,
   markOnboardingComplete,
 } from "./lib/onboarding";
+import { PrivacyPage } from "./pages/PrivacyPage";
+import { StoragePage } from "./pages/StoragePage";
+import { TimelinePage } from "./pages/TimelinePage";
 import { TodayPage } from "./pages/TodayPage";
 import { useAppRuntime } from "./stores/useAppRuntime";
 import type { PageId } from "./types/app";
-
-const PrivacyPage = lazy(() =>
-  import("./pages/PrivacyPage").then((module) => ({
-    default: module.PrivacyPage,
-  })),
-);
-const StoragePage = lazy(() =>
-  import("./pages/StoragePage").then((module) => ({
-    default: module.StoragePage,
-  })),
-);
-const TimelinePage = lazy(() =>
-  import("./pages/TimelinePage").then((module) => ({
-    default: module.TimelinePage,
-  })),
-);
 
 const pageTitles: Record<PageId, string> = {
   today: "今日",
   timeline: "时间线",
   privacy: "隐私中心",
-  storage: "存储与 AI",
+  storage: "远程存储",
 };
 
 export default function App() {
@@ -82,21 +69,15 @@ export default function App() {
                     snapshot={snapshot}
                   />
                 )}
-                <Suspense
-                  fallback={
-                    <div className="loading-state">正在打开本机页面…</div>
-                  }
-                >
-                  {activePage === "timeline" && <TimelinePage />}
-                  {activePage === "privacy" && (
-                    <PrivacyPage
-                      loading={loading}
-                      onSave={updateSettings}
-                      settings={snapshot.settings}
-                    />
-                  )}
-                  {activePage === "storage" && <StoragePage />}
-                </Suspense>
+                {activePage === "timeline" && <TimelinePage />}
+                {activePage === "privacy" && (
+                  <PrivacyPage
+                    loading={loading}
+                    onSave={updateSettings}
+                    settings={snapshot.settings}
+                  />
+                )}
+                {activePage === "storage" && <StoragePage />}
               </>
             )}
           </div>

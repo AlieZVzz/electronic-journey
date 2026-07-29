@@ -18,7 +18,7 @@ export interface AppSnapshot {
   nextCaptureAt: string | null;
   todayCount: number;
   localStorageBytes: number;
-  pendingAiJobs: number;
+  pendingUploads: number;
   permissionGranted: boolean;
   permissionState: PermissionState;
   lastError: string | null;
@@ -29,6 +29,57 @@ export interface TimelineCapture {
   id: string;
   capturedAtUtc: string;
   fileSize: number;
+  uploadState:
+    | "not_uploaded"
+    | "pending"
+    | "uploading"
+    | "uploaded"
+    | "failed"
+    | "cancelled";
+}
+
+export interface RemoteProfile {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  privateKeyPath: string;
+  hostKeyFingerprint: string;
+  remoteRoot: string;
+  hasPassphrase: boolean;
+}
+
+export interface SaveRemoteProfileInput
+  extends Omit<RemoteProfile, "hasPassphrase"> {
+  privateKeyPassphrase: string | null;
+}
+
+export interface RemoteConnectionTest {
+  remoteRoot: string;
+  writable: boolean;
+}
+
+export type UploadBatchState =
+  | "pending"
+  | "uploading"
+  | "completed"
+  | "partial_failed"
+  | "cancelled";
+
+export interface UploadItemProgress {
+  captureId: string;
+  state: TimelineCapture["uploadState"];
+}
+
+export interface UploadBatchProgress {
+  batchId: string;
+  state: UploadBatchState;
+  totalItems: number;
+  totalBytes: number;
+  uploadedItems: number;
+  failedItems: number;
+  items: UploadItemProgress[];
+  lastError: string | null;
 }
 
 export interface TimelinePageResult {

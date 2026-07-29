@@ -37,7 +37,7 @@ const navigation: Array<{ id: PageId; label: string; icon: ReactNode }> = [
   },
   {
     id: "storage",
-    label: "存储与 AI",
+    label: "远程存储",
     icon: (
       <svg viewBox="0 0 20 20">
         <ellipse cx="10" cy="5" rx="6" ry="2.5" />

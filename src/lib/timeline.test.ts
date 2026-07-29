@@ -9,11 +9,13 @@ describe("timeline grouping", () => {
         id: "one",
         capturedAtUtc: "2026-07-28T15:30:00Z",
         fileSize: 10,
+        uploadState: "not_uploaded" as const,
       },
       {
         id: "two",
         capturedAtUtc: "2026-07-28T16:30:00Z",
         fileSize: 20,
+        uploadState: "not_uploaded" as const,
       },
     ];
 
@@ -27,11 +29,13 @@ describe("timeline grouping", () => {
         id: "newer",
         capturedAtUtc: "2026-07-28T12:00:00Z",
         fileSize: 10,
+        uploadState: "uploaded" as const,
       },
       {
         id: "older",
         capturedAtUtc: "2026-07-28T10:00:00Z",
         fileSize: 20,
+        uploadState: "not_uploaded" as const,
       },
     ];
 
