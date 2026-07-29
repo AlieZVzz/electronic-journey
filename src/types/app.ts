@@ -10,7 +10,6 @@ export type PermissionState = "not_determined" | "granted" | "denied";
 export interface CaptureSettings {
   intervalMinutes: number;
   idlePauseMinutes: number;
-  skipDuplicates: boolean;
 }
 
 export interface AppSnapshot {
@@ -47,10 +46,34 @@ export interface RemoteProfile {
   hostKeyFingerprint: string;
   remoteRoot: string;
   hasPassphrase: boolean;
+  autoSyncEnabled: boolean;
+  syncIntervalMinutes: number;
+  nextAutoSyncAtUtc: string | null;
+  lastAutoSyncAttemptAtUtc: string | null;
+  lastAutoSyncState:
+    | "running"
+    | "completed"
+    | "partial_failed"
+    | "empty"
+    | "skipped_busy"
+    | "suspended"
+    | null;
+  lastAutoSyncCompletedItems: number;
+  lastAutoSyncFailedItems: number;
+  autoSyncSuspendedReason: string | null;
 }
 
 export interface SaveRemoteProfileInput
-  extends Omit<RemoteProfile, "hasPassphrase"> {
+  extends Omit<
+    RemoteProfile,
+    | "hasPassphrase"
+    | "nextAutoSyncAtUtc"
+    | "lastAutoSyncAttemptAtUtc"
+    | "lastAutoSyncState"
+    | "lastAutoSyncCompletedItems"
+    | "lastAutoSyncFailedItems"
+    | "autoSyncSuspendedReason"
+  > {
   privateKeyPassphrase: string | null;
 }
 

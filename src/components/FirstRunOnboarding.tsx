@@ -52,7 +52,7 @@ export function FirstRunOnboarding({
             <h1 id="onboarding-title">开始你的私人数字旅程</h1>
             <p className="onboarding-lead">
               Electronic Journey 只在你主动开启时记录屏幕。截图默认只保存在本机，
-              不会自动上传或发送给第三方。
+              默认不会上传；只有你之后配置个人服务器并明确开启自动同步，图片才会按计划离开本机。
             </p>
 
             <ul className="onboarding-promises">
@@ -142,6 +142,7 @@ export function FirstRunOnboarding({
               {!permissionReady && (
                 <button
                   className="button button--onboarding-primary"
+                  aria-busy={loading}
                   disabled={
                     !canRequestScreenCapturePermission(
                       permissionAcknowledged,

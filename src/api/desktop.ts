@@ -179,6 +179,13 @@ export const desktopApi = {
     return invoke<RemoteConnectionTest>("test_remote_profile");
   },
 
+  async syncTodayNow(): Promise<void> {
+    if (!isTauriRuntime()) {
+      throw new Error("只能在桌面应用中同步截图。");
+    }
+    return invoke<void>("sync_today_now");
+  },
+
   async uploadSelectedCaptures(
     captureIds: string[],
   ): Promise<UploadBatchProgress> {

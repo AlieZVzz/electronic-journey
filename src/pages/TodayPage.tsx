@@ -5,6 +5,10 @@ import { MetricCard } from "../components/MetricCard";
 import { ScreenCaptureDisclosure } from "../components/ScreenCaptureDisclosure";
 import { StatusPill } from "../components/StatusPill";
 import { canRequestScreenCapturePermission } from "../lib/screenCaptureDisclosure";
+import {
+  recordingActionLabel,
+  type RuntimeAction,
+} from "../lib/interactionFeedback";
 import type {
   AppSnapshot,
   RecordingState,
@@ -14,6 +18,8 @@ import type {
 interface TodayPageProps {
   snapshot: AppSnapshot;
   loading: boolean;
+  pendingAction: RuntimeAction | null;
+  recordingTarget: RecordingState | null;
   onPermissionRequest: () => Promise<AppSnapshot>;
   onStateChange: (state: RecordingState) => Promise<void>;
 }
@@ -41,10 +47,13 @@ function formatNextCapture(value: string | null): string {
 export function TodayPage({
   snapshot,
   loading,
+  pendingAction,
+  recordingTarget,
   onPermissionRequest,
   onStateChange,
 }: TodayPageProps) {
   const isRunning = snapshot.state === "running";
+  const recordingPending = pendingAction === "recording";
   const [showPermissionDisclosure, setShowPermissionDisclosure] =
     useState(false);
   const [permissionAcknowledged, setPermissionAcknowledged] = useState(false);
@@ -166,19 +175,24 @@ export function TodayPage({
           <button
             className="button button--primary"
             disabled={loading}
+            aria-busy={recordingPending && recordingTarget !== "stopped"}
             onClick={() => onStateChange(isRunning ? "paused" : "running")}
             type="button"
           >
-            {isRunning ? "暂停记录" : "开始记录"}
+            {recordingActionLabel(
+              snapshot.state,
+              recordingTarget === "stopped" ? null : recordingTarget,
+            )}
           </button>
           {snapshot.state !== "stopped" && (
             <button
               className="button button--ghost"
               disabled={loading}
+              aria-busy={recordingTarget === "stopped"}
               onClick={() => onStateChange("stopped")}
               type="button"
             >
-              停止
+              {recordingTarget === "stopped" ? "正在停止…" : "停止"}
             </button>
           )}
         </div>
@@ -197,7 +211,7 @@ export function TodayPage({
           value={formatBytes(snapshot.localStorageBytes)}
         />
         <MetricCard
-          detail="仅统计进行中的手动上传"
+          detail="统计进行中的手动或自动上传"
           label="上传任务"
           tone="amber"
           value={`${snapshot.pendingUploads} 项`}
@@ -288,7 +302,7 @@ export function TodayPage({
               <span />
               <div>
                 <strong>本地存储</strong>
-                <p>普通 WebP · 不自动上传</p>
+                <p>普通 WebP · 自动同步默认关闭</p>
               </div>
             </li>
           </ul>
@@ -323,6 +337,7 @@ export function TodayPage({
               </button>
               <button
                 className="button button--onboarding-primary"
+                aria-busy={pendingAction === "permission"}
                 disabled={
                   !canRequestScreenCapturePermission(
                     permissionAcknowledged,

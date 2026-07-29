@@ -1,8 +1,10 @@
+mod auto_sync;
 mod capture;
 mod capture_pipeline;
 mod commands;
 mod database;
 mod error;
+mod image_fingerprint;
 mod privacy;
 mod scheduler;
 mod timeline;
@@ -71,6 +73,7 @@ pub fn run() {
                 &data_dir.join("electronic-journey.sqlite3"),
             ))?;
             app.manage(pool);
+            auto_sync::spawn_scheduler(app.handle().clone());
             trace_startup("database ready");
             Ok(())
         })
@@ -97,6 +100,7 @@ pub fn run() {
             commands::request_screen_capture_permission,
             commands::set_recording_state,
             commands::save_remote_profile,
+            commands::sync_today_now,
             commands::test_remote_profile,
             commands::update_capture_settings,
             commands::upload_selected_captures,

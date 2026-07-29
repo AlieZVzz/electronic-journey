@@ -1,21 +1,29 @@
 import { useState } from "react";
 
+import {
+  captureSettingsEqual,
+  type RuntimeAction,
+} from "../lib/interactionFeedback";
 import { captureIntervals, validateCaptureSettings } from "../lib/settings";
 import type { CaptureSettings } from "../types/app";
 
 interface PrivacyPageProps {
   settings: CaptureSettings;
   loading: boolean;
+  pendingAction: RuntimeAction | null;
   onSave: (settings: CaptureSettings) => Promise<void>;
 }
 
 export function PrivacyPage({
   settings,
   loading,
+  pendingAction,
   onSave,
 }: PrivacyPageProps) {
   const [draft, setDraft] = useState(settings);
   const errors = validateCaptureSettings(draft);
+  const dirty = !captureSettingsEqual(draft, settings);
+  const saving = pendingAction === "settings";
 
   return (
     <section className="placeholder-page">
@@ -63,20 +71,6 @@ export function PrivacyPage({
           />
         </label>
 
-        <label className="toggle-row">
-          <span>
-            <strong>跳过重复画面</strong>
-            <small>重复检测仅在本机执行</small>
-          </span>
-          <input
-            checked={draft.skipDuplicates}
-            onChange={(event) =>
-              setDraft({ ...draft, skipDuplicates: event.target.checked })
-            }
-            type="checkbox"
-          />
-        </label>
-
         {errors.length > 0 && (
           <ul className="form-errors">
             {errors.map((error) => (
@@ -87,11 +81,12 @@ export function PrivacyPage({
 
         <button
           className="button button--primary"
-          disabled={loading || errors.length > 0}
-          onClick={() => onSave(draft)}
+          aria-busy={saving}
+          disabled={loading || errors.length > 0 || !dirty}
+          onClick={() => void onSave(draft)}
           type="button"
         >
-          保存设置
+          {saving ? "正在保存…" : dirty ? "保存设置" : "设置已保存"}
         </button>
       </div>
     </section>

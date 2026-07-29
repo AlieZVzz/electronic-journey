@@ -61,6 +61,15 @@ async fn recover_interrupted_uploads(pool: &SqlitePool) -> Result<(), DatabaseEr
     .await?;
     sqlx::query(
         r#"
+        UPDATE remote_profiles
+        SET last_auto_sync_state = 'partial_failed'
+        WHERE last_auto_sync_state = 'running'
+        "#,
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
         UPDATE upload_batches
         SET
             state = 'partial_failed',
@@ -95,6 +104,7 @@ pub struct NewCaptureRecord<'a> {
     pub thumbnail_path: Option<&'a str>,
     pub file_size: u64,
     pub content_sha256: &'a str,
+    pub pixel_sha256: Option<&'a str>,
     pub thumbnail_state: &'a str,
 }
 
@@ -119,10 +129,11 @@ pub async fn insert_capture(
             thumbnail_path,
             file_size,
             content_sha256,
+            pixel_sha256,
             thumbnail_state,
             created_at_utc
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(capture.id.to_string())
@@ -134,6 +145,7 @@ pub async fn insert_capture(
     .bind(capture.thumbnail_path)
     .bind(file_size)
     .bind(capture.content_sha256)
+    .bind(capture.pixel_sha256)
     .bind(capture.thumbnail_state)
     .bind(&timestamp)
     .execute(&mut *transaction)
@@ -162,10 +174,11 @@ pub async fn insert_capture_if_missing(
             thumbnail_path,
             file_size,
             content_sha256,
+            pixel_sha256,
             thumbnail_state,
             created_at_utc
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(capture.id.to_string())
@@ -177,6 +190,7 @@ pub async fn insert_capture_if_missing(
     .bind(capture.thumbnail_path)
     .bind(file_size)
     .bind(capture.content_sha256)
+    .bind(capture.pixel_sha256)
     .bind(capture.thumbnail_state)
     .bind(&timestamp)
     .execute(pool)
@@ -189,6 +203,27 @@ pub async fn capture_ids(pool: &SqlitePool) -> Result<HashSet<String>, DatabaseE
         .fetch_all(pool)
         .await?;
     Ok(ids.into_iter().collect())
+}
+
+pub async fn latest_capture_pixel_sha256(
+    pool: &SqlitePool,
+    device_id: &str,
+    display_id: &str,
+) -> Result<Option<Option<String>>, DatabaseError> {
+    sqlx::query_scalar(
+        r#"
+        SELECT pixel_sha256
+        FROM captures
+        WHERE device_id = ? AND display_id = ?
+        ORDER BY captured_at_utc DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(device_id)
+    .bind(display_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(Into::into)
 }
 
 pub async fn active_upload_count(pool: &SqlitePool) -> Result<u32, DatabaseError> {
@@ -339,6 +374,14 @@ pub struct RemoteProfileRecord {
     pub host_key_fingerprint: String,
     pub remote_root: String,
     pub has_passphrase: bool,
+    pub auto_sync_enabled: bool,
+    pub sync_interval_minutes: i64,
+    pub next_auto_sync_at_utc: Option<DateTime<Utc>>,
+    pub last_auto_sync_attempt_at_utc: Option<DateTime<Utc>>,
+    pub last_auto_sync_state: Option<String>,
+    pub last_auto_sync_completed_items: i64,
+    pub last_auto_sync_failed_items: i64,
+    pub auto_sync_suspended_reason: Option<String>,
 }
 
 pub struct SaveRemoteProfile<'a> {
@@ -402,7 +445,11 @@ pub async fn remote_profile(
         r#"
         SELECT
             name, host, port, username, private_key_path,
-            host_key_fingerprint, remote_root, has_passphrase
+            host_key_fingerprint, remote_root, has_passphrase,
+            auto_sync_enabled, sync_interval_minutes,
+            next_auto_sync_at_utc, last_auto_sync_attempt_at_utc,
+            last_auto_sync_state, last_auto_sync_completed_items,
+            last_auto_sync_failed_items, auto_sync_suspended_reason
         FROM remote_profiles
         WHERE id = ?
         "#,
@@ -411,6 +458,186 @@ pub async fn remote_profile(
     .fetch_optional(pool)
     .await
     .map_err(Into::into)
+}
+
+pub async fn save_auto_sync_settings(
+    pool: &SqlitePool,
+    profile_id: &str,
+    enabled: bool,
+    interval_minutes: u16,
+    next_run_at: Option<DateTime<Utc>>,
+) -> Result<(), DatabaseError> {
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let next_run_at =
+        next_run_at.map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    sqlx::query(
+        r#"
+        UPDATE remote_profiles
+        SET
+            auto_sync_enabled = ?,
+            sync_interval_minutes = ?,
+            next_auto_sync_at_utc = ?,
+            auto_sync_suspended_reason = NULL,
+            last_auto_sync_state = CASE
+                WHEN ? = 0 THEN NULL
+                WHEN last_auto_sync_state = 'suspended' THEN NULL
+                ELSE last_auto_sync_state
+            END,
+            updated_at_utc = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(enabled)
+    .bind(i64::from(interval_minutes))
+    .bind(next_run_at)
+    .bind(enabled)
+    .bind(now)
+    .bind(profile_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn claim_auto_sync(
+    pool: &SqlitePool,
+    profile_id: &str,
+    now: DateTime<Utc>,
+    force: bool,
+) -> Result<Option<RemoteProfileRecord>, DatabaseError> {
+    let mut transaction = pool.begin().await?;
+    let profile = sqlx::query_as::<_, RemoteProfileRecord>(
+        r#"
+        SELECT
+            name, host, port, username, private_key_path,
+            host_key_fingerprint, remote_root, has_passphrase,
+            auto_sync_enabled, sync_interval_minutes,
+            next_auto_sync_at_utc, last_auto_sync_attempt_at_utc,
+            last_auto_sync_state, last_auto_sync_completed_items,
+            last_auto_sync_failed_items, auto_sync_suspended_reason
+        FROM remote_profiles
+        WHERE id = ?
+          AND auto_sync_enabled = 1
+          AND auto_sync_suspended_reason IS NULL
+          AND (last_auto_sync_state IS NULL OR last_auto_sync_state <> 'running')
+          AND (? = 1 OR next_auto_sync_at_utc <= ?)
+        "#,
+    )
+    .bind(profile_id)
+    .bind(force)
+    .bind(now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let Some(mut profile) = profile else {
+        transaction.commit().await?;
+        return Ok(None);
+    };
+    let interval = u16::try_from(profile.sync_interval_minutes)
+        .ok()
+        .filter(|value| matches!(value, 15 | 30 | 60 | 120 | 240))
+        .ok_or(DatabaseError::InvalidUploadSelection)?;
+    let next_run = now + chrono::Duration::minutes(i64::from(interval));
+    let now_text = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let next_text = next_run.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let result = sqlx::query(
+        r#"
+        UPDATE remote_profiles
+        SET
+            last_auto_sync_attempt_at_utc = ?,
+            next_auto_sync_at_utc = ?,
+            last_auto_sync_state = 'running',
+            last_auto_sync_completed_items = 0,
+            last_auto_sync_failed_items = 0
+        WHERE id = ?
+          AND auto_sync_enabled = 1
+          AND auto_sync_suspended_reason IS NULL
+          AND (last_auto_sync_state IS NULL OR last_auto_sync_state <> 'running')
+          AND (? = 1 OR next_auto_sync_at_utc <= ?)
+        "#,
+    )
+    .bind(&now_text)
+    .bind(&next_text)
+    .bind(profile_id)
+    .bind(force)
+    .bind(&now_text)
+    .execute(&mut *transaction)
+    .await?;
+    if result.rows_affected() != 1 {
+        transaction.rollback().await?;
+        return Ok(None);
+    }
+    transaction.commit().await?;
+    profile.last_auto_sync_attempt_at_utc = Some(now);
+    profile.next_auto_sync_at_utc = Some(next_run);
+    profile.last_auto_sync_state = Some("running".to_string());
+    profile.last_auto_sync_completed_items = 0;
+    profile.last_auto_sync_failed_items = 0;
+    Ok(Some(profile))
+}
+
+pub async fn record_auto_sync_result(
+    pool: &SqlitePool,
+    profile_id: &str,
+    state: &str,
+    completed_items: usize,
+    failed_items: usize,
+    suspended_reason: Option<&str>,
+) -> Result<(), DatabaseError> {
+    sqlx::query(
+        r#"
+        UPDATE remote_profiles
+        SET
+            last_auto_sync_state = ?,
+            last_auto_sync_completed_items = ?,
+            last_auto_sync_failed_items = ?,
+            auto_sync_suspended_reason = ?,
+            next_auto_sync_at_utc = CASE WHEN ? IS NULL
+                THEN next_auto_sync_at_utc
+                ELSE NULL
+            END
+        WHERE id = ?
+        "#,
+    )
+    .bind(state)
+    .bind(i64::try_from(completed_items).map_err(|_| DatabaseError::InvalidUploadSelection)?)
+    .bind(i64::try_from(failed_items).map_err(|_| DatabaseError::InvalidUploadSelection)?)
+    .bind(suspended_reason)
+    .bind(suspended_reason)
+    .bind(profile_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn unsynced_capture_ids(
+    pool: &SqlitePool,
+    start_utc: DateTime<Utc>,
+    end_utc: DateTime<Utc>,
+    limit: usize,
+) -> Result<Vec<Uuid>, DatabaseError> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT captures.id
+        FROM captures
+        WHERE captures.captured_at_utc >= ?
+          AND captures.captured_at_utc < ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM upload_items
+              WHERE upload_items.capture_id = captures.id
+                AND upload_items.state IN ('pending', 'uploading', 'uploaded')
+          )
+        ORDER BY captures.captured_at_utc, captures.id
+        LIMIT ?
+        "#,
+    )
+    .bind(start_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    .bind(end_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    .bind(i64::try_from(limit).map_err(|_| DatabaseError::InvalidUploadSelection)?)
+    .fetch_all(pool)
+    .await?;
+    ids.into_iter()
+        .map(|value| Uuid::parse_str(&value).map_err(|_| DatabaseError::InvalidUploadSelection))
+        .collect()
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -431,9 +658,11 @@ pub async fn create_upload_batch(
     pool: &SqlitePool,
     profile_id: &str,
     capture_ids: &[Uuid],
+    source: &str,
 ) -> Result<NewUploadBatch, DatabaseError> {
     let unique_ids: HashSet<_> = capture_ids.iter().copied().collect();
-    if unique_ids.is_empty()
+    if !matches!(source, "manual" | "automatic")
+        || unique_ids.is_empty()
         || unique_ids.len() != capture_ids.len()
         || unique_ids.len() > MAX_UPLOAD_BATCH_SIZE
     {
@@ -472,9 +701,10 @@ pub async fn create_upload_batch(
         r#"
         INSERT INTO upload_batches (
             id, profile_id, state, total_items, total_bytes,
-            completed_items, failed_items, created_at_utc, updated_at_utc
+            completed_items, failed_items, created_at_utc, updated_at_utc,
+            source
         )
-        VALUES (?, ?, 'pending', ?, ?, 0, 0, ?, ?)
+        VALUES (?, ?, 'pending', ?, ?, 0, 0, ?, ?, ?)
         "#,
     )
     .bind(batch_id.to_string())
@@ -483,6 +713,7 @@ pub async fn create_upload_batch(
     .bind(i64::try_from(total_bytes).map_err(|_| DatabaseError::InvalidFileSize)?)
     .bind(&now)
     .bind(&now)
+    .bind(source)
     .execute(&mut *transaction)
     .await?;
 
@@ -766,8 +997,28 @@ mod tests {
             thumbnail_path: None,
             file_size: 10,
             content_sha256: "abc",
+            pixel_sha256: Some("pixels"),
             thumbnail_state: "pending",
         }
+    }
+
+    async fn save_test_remote_profile(pool: &SqlitePool) {
+        save_remote_profile(
+            pool,
+            &SaveRemoteProfile {
+                id: "primary",
+                name: "Personal server",
+                host: "example.test",
+                port: 22,
+                username: "journey",
+                private_key_path: "/Users/test/.ssh/id_ed25519",
+                host_key_fingerprint: "SHA256:test",
+                remote_root: "/srv/journey",
+                has_passphrase: false,
+            },
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -805,6 +1056,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn latest_pixel_fingerprint_is_scoped_to_the_display() {
+        let pool = migrated_memory_pool().await;
+        let captured_at = DateTime::parse_from_rfc3339("2026-07-29T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let first_id = Uuid::new_v4();
+        let mut first = record(first_id, captured_at);
+        first.local_path = "captures/first.webp";
+        first.pixel_sha256 = Some("first-pixels");
+        insert_capture(&pool, &first).await.unwrap();
+
+        let second_id = Uuid::new_v4();
+        let mut second = record(second_id, captured_at + chrono::Duration::seconds(1));
+        second.local_path = "captures/second.webp";
+        second.display_id = "second-display";
+        second.pixel_sha256 = Some("second-pixels");
+        insert_capture(&pool, &second).await.unwrap();
+
+        assert_eq!(
+            latest_capture_pixel_sha256(&pool, "local", "display")
+                .await
+                .unwrap(),
+            Some(Some("first-pixels".into()))
+        );
+        assert_eq!(
+            latest_capture_pixel_sha256(&pool, "local", "second-display")
+                .await
+                .unwrap(),
+            Some(Some("second-pixels".into()))
+        );
+        assert_eq!(
+            latest_capture_pixel_sha256(&pool, "local", "missing-display")
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn fresh_schema_replaces_ai_jobs_with_upload_queue() {
         let pool = migrated_memory_pool().await;
         let columns: Vec<(String,)> =
@@ -817,6 +1107,7 @@ mod tests {
         assert!(!columns.contains(&"cipher_size".to_string()));
         assert!(!columns.contains(&"key_version".to_string()));
         assert!(!columns.contains(&"storage_format".to_string()));
+        assert!(columns.contains(&"pixel_sha256".to_string()));
 
         let upload_tables: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE '%upload%'",
@@ -832,6 +1123,75 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(ai_tables.0, 0);
+    }
+
+    #[tokio::test]
+    async fn automatic_sync_is_opt_in_and_a_due_run_is_claimed_once() {
+        let pool = migrated_memory_pool().await;
+        save_test_remote_profile(&pool).await;
+        let now = Utc::now();
+
+        let stored = remote_profile(&pool, "primary").await.unwrap().unwrap();
+        assert!(!stored.auto_sync_enabled);
+        assert_eq!(stored.sync_interval_minutes, 30);
+        assert!(claim_auto_sync(&pool, "primary", now, false)
+            .await
+            .unwrap()
+            .is_none());
+
+        save_auto_sync_settings(
+            &pool,
+            "primary",
+            true,
+            30,
+            Some(now - chrono::Duration::seconds(1)),
+        )
+        .await
+        .unwrap();
+        let claimed = claim_auto_sync(&pool, "primary", now, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.last_auto_sync_state.as_deref(), Some("running"));
+        assert!(claimed.next_auto_sync_at_utc.unwrap() > now);
+        assert!(claim_auto_sync(&pool, "primary", now, true)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn automatic_sync_selects_only_unsynced_captures_in_the_day() {
+        let pool = migrated_memory_pool().await;
+        save_test_remote_profile(&pool).await;
+        let start = DateTime::parse_from_rfc3339("2026-07-29T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let uploaded_id = Uuid::new_v4();
+        let pending_id = Uuid::new_v4();
+        let previous_day_id = Uuid::new_v4();
+        let mut uploaded = record(uploaded_id, start + chrono::Duration::hours(1));
+        uploaded.local_path = "captures/uploaded.webp";
+        let mut pending = record(pending_id, start + chrono::Duration::hours(2));
+        pending.local_path = "captures/pending.webp";
+        let mut previous = record(previous_day_id, start - chrono::Duration::seconds(1));
+        previous.local_path = "captures/previous.webp";
+        insert_capture(&pool, &uploaded).await.unwrap();
+        insert_capture(&pool, &pending).await.unwrap();
+        insert_capture(&pool, &previous).await.unwrap();
+        let batch = create_upload_batch(&pool, "primary", &[uploaded_id], "manual")
+            .await
+            .unwrap();
+        let item = upload_batch_items(&pool, batch.id).await.unwrap().remove(0);
+        set_upload_item_state(&pool, &item.id, "uploaded", None)
+            .await
+            .unwrap();
+        finish_upload_batch(&pool, batch.id, 1, 0).await.unwrap();
+
+        let selected = unsynced_capture_ids(&pool, start, start + chrono::Duration::days(1), 500)
+            .await
+            .unwrap();
+        assert_eq!(selected, vec![pending_id]);
     }
 
     #[tokio::test]
@@ -860,7 +1220,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let batch = create_upload_batch(&pool, "primary", &[capture_id])
+        let batch = create_upload_batch(&pool, "primary", &[capture_id], "manual")
             .await
             .unwrap();
         let item = upload_batch_items(&pool, batch.id).await.unwrap().remove(0);
@@ -915,7 +1275,7 @@ mod tests {
         .await
         .unwrap();
 
-        let batch = create_upload_batch(&pool, "primary", &[capture_id])
+        let batch = create_upload_batch(&pool, "primary", &[capture_id], "manual")
             .await
             .unwrap();
         let item = upload_batch_items(&pool, batch.id).await.unwrap().remove(0);
@@ -924,7 +1284,7 @@ mod tests {
             format!("2026/07/29/20260729T020304567Z_{capture_id}.webp")
         );
         assert!(matches!(
-            create_upload_batch(&pool, "primary", &[capture_id, capture_id]).await,
+            create_upload_batch(&pool, "primary", &[capture_id, capture_id], "manual",).await,
             Err(DatabaseError::InvalidUploadSelection)
         ));
     }
@@ -960,12 +1320,17 @@ mod tests {
         .await
         .unwrap();
 
-        let batch = create_upload_batch(&pool, "primary", &[first_capture_id, second_capture_id])
-            .await
-            .unwrap();
+        let batch = create_upload_batch(
+            &pool,
+            "primary",
+            &[first_capture_id, second_capture_id],
+            "manual",
+        )
+        .await
+        .unwrap();
         assert_eq!(active_upload_batch_id(&pool).await.unwrap(), Some(batch.id));
         assert!(matches!(
-            create_upload_batch(&pool, "primary", &[first_capture_id]).await,
+            create_upload_batch(&pool, "primary", &[first_capture_id], "manual").await,
             Err(DatabaseError::UploadAlreadyInProgress)
         ));
 
@@ -995,7 +1360,7 @@ mod tests {
         );
         assert_eq!(active_upload_batch_id(&pool).await.unwrap(), None);
 
-        create_upload_batch(&pool, "primary", &[first_capture_id])
+        create_upload_batch(&pool, "primary", &[first_capture_id], "manual")
             .await
             .unwrap();
     }
@@ -1026,7 +1391,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let batch = create_upload_batch(&pool, "primary", &[capture_id])
+        let batch = create_upload_batch(&pool, "primary", &[capture_id], "manual")
             .await
             .unwrap();
         start_upload_batch(&pool, batch.id).await.unwrap();

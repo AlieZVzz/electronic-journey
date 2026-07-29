@@ -15,7 +15,6 @@ describe("capture settings", () => {
       validateCaptureSettings({
         intervalMinutes: 3,
         idlePauseMinutes: -1,
-        skipDuplicates: false,
       }),
     ).toHaveLength(2);
   });

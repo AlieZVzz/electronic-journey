@@ -37,7 +37,6 @@ pub enum RecordingState {
 pub struct CaptureSettings {
     pub interval_minutes: u16,
     pub idle_pause_minutes: u16,
-    pub skip_duplicates: bool,
 }
 
 impl Default for CaptureSettings {
@@ -45,7 +44,6 @@ impl Default for CaptureSettings {
         Self {
             interval_minutes: 5,
             idle_pause_minutes: 10,
-            skip_duplicates: true,
         }
     }
 }
@@ -253,7 +251,7 @@ impl RuntimeState {
                 .unwrap_or(false)
     }
 
-    fn capture_succeeded(&self, generation: u64, storage_size: u64) -> Option<StdDuration> {
+    fn capture_completed(&self, generation: u64, stored_bytes: Option<u64>) -> Option<StdDuration> {
         if self.schedule_generation.load(Ordering::SeqCst) != generation {
             return None;
         }
@@ -261,12 +259,23 @@ impl RuntimeState {
         if !matches!(snapshot.state, RecordingState::Running) {
             return None;
         }
-        snapshot.today_count = snapshot.today_count.saturating_add(1);
-        snapshot.local_storage_bytes = snapshot.local_storage_bytes.saturating_add(storage_size);
+        if let Some(storage_size) = stored_bytes {
+            snapshot.today_count = snapshot.today_count.saturating_add(1);
+            snapshot.local_storage_bytes =
+                snapshot.local_storage_bytes.saturating_add(storage_size);
+        }
         snapshot.last_error = None;
         let delay = StdDuration::from_secs(u64::from(snapshot.settings.interval_minutes) * 60);
         snapshot.next_capture_at = Some(next_capture_at(Utc::now(), delay).to_rfc3339());
         Some(delay)
+    }
+
+    fn capture_succeeded(&self, generation: u64, storage_size: u64) -> Option<StdDuration> {
+        self.capture_completed(generation, Some(storage_size))
+    }
+
+    fn capture_skipped(&self, generation: u64) -> Option<StdDuration> {
+        self.capture_completed(generation, None)
     }
 
     fn capture_failed(&self, generation: u64, message: String, permission_denied: bool) {
@@ -344,10 +353,16 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
             )
             .await
             {
-                Ok(stored) => {
+                Ok(capture_pipeline::PersistCaptureOutcome::Stored(stored)) => {
                     let Some(next_delay) =
                         runtime.capture_succeeded(generation, stored.storage_size)
                     else {
+                        return;
+                    };
+                    delay = next_delay;
+                }
+                Ok(capture_pipeline::PersistCaptureOutcome::SkippedDuplicate) => {
+                    let Some(next_delay) = runtime.capture_skipped(generation) else {
                         return;
                     };
                     delay = next_delay;
@@ -692,6 +707,18 @@ pub async fn save_remote_profile(
     )
     .await
     .map_err(|_| "无法保存远程服务器配置。".to_string())?;
+    let next_auto_sync_at = input
+        .auto_sync_enabled
+        .then(|| Utc::now() + chrono::Duration::minutes(i64::from(input.sync_interval_minutes)));
+    crate::database::save_auto_sync_settings(
+        pool.inner(),
+        upload::profile_id(),
+        input.auto_sync_enabled,
+        input.sync_interval_minutes,
+        next_auto_sync_at,
+    )
+    .await
+    .map_err(|_| "服务器配置已保存，但自动同步设置未能确认保存。".to_string())?;
     let stored = crate::database::remote_profile(pool.inner(), upload::profile_id())
         .await
         .map_err(|_| "无法读取刚保存的配置。".to_string())?
@@ -718,6 +745,23 @@ pub async fn test_remote_profile(
         .await
         .map_err(|error| upload_error_message(&error));
     session.disconnect().await;
+    if result.is_ok() && profile.auto_sync_enabled {
+        let next_run = Utc::now()
+            + chrono::Duration::minutes(
+                u16::try_from(profile.sync_interval_minutes)
+                    .map(i64::from)
+                    .unwrap_or(30),
+            );
+        crate::database::save_auto_sync_settings(
+            pool.inner(),
+            upload::profile_id(),
+            true,
+            u16::try_from(profile.sync_interval_minutes).unwrap_or(30),
+            Some(next_run),
+        )
+        .await
+        .map_err(|_| "连接验证通过，但自动同步暂停状态未能更新。".to_string())?;
+    }
     result
 }
 
@@ -790,12 +834,18 @@ async fn load_upload_progress(
     upload_progress_from_record(status)
 }
 
-async fn run_upload_batch(
+pub(crate) struct UploadRunResult {
+    pub uploaded_items: usize,
+    pub failed_items: usize,
+    pub fatal_error_code: Option<String>,
+}
+
+pub(crate) async fn run_upload_batch(
     app: AppHandle,
     pool: SqlitePool,
     profile: crate::database::RemoteProfileRecord,
     batch_id: uuid::Uuid,
-) -> Result<(), ()> {
+) -> Result<UploadRunResult, ()> {
     crate::database::start_upload_batch(&pool, batch_id)
         .await
         .map_err(|_| ())?;
@@ -805,10 +855,15 @@ async fn run_upload_batch(
     let session = match upload::RemoteSession::connect(&profile).await {
         Ok(session) => session,
         Err(error) => {
+            let error_code = upload_error_code(&error);
             crate::database::fail_active_upload_batch(&pool, batch_id, upload_error_code(&error))
                 .await
                 .map_err(|_| ())?;
-            return Ok(());
+            return Ok(UploadRunResult {
+                uploaded_items: 0,
+                failed_items: items.len(),
+                fatal_error_code: Some(error_code.to_string()),
+            });
         }
     };
 
@@ -869,7 +924,12 @@ async fn run_upload_batch(
     session.disconnect().await;
     crate::database::finish_upload_batch(&pool, batch_id, uploaded_items, failed_items)
         .await
-        .map_err(|_| ())
+        .map_err(|_| ())?;
+    Ok(UploadRunResult {
+        uploaded_items,
+        failed_items,
+        fatal_error_code: None,
+    })
 }
 
 #[tauri::command]
@@ -890,21 +950,25 @@ pub async fn upload_selected_captures(
         .ok_or_else(|| "请先在“远程存储”中保存并测试服务器配置。".to_string())?;
     upload::validate_stored_profile(&app, &profile)
         .map_err(|error| upload_error_message(&error))?;
-    let batch =
-        crate::database::create_upload_batch(pool.inner(), upload::profile_id(), &capture_ids)
-            .await
-            .map_err(|error| match error {
-                crate::database::DatabaseError::InvalidUploadSelection => {
-                    "请选择 1 至 500 张不重复的截图。".to_string()
-                }
-                crate::database::DatabaseError::CaptureNotFound => {
-                    "选择中包含已经删除的截图，请刷新后重试。".to_string()
-                }
-                crate::database::DatabaseError::UploadAlreadyInProgress => {
-                    "已有一个后台上传批次正在运行。".to_string()
-                }
-                _ => "无法创建上传批次。".to_string(),
-            })?;
+    let batch = crate::database::create_upload_batch(
+        pool.inner(),
+        upload::profile_id(),
+        &capture_ids,
+        "manual",
+    )
+    .await
+    .map_err(|error| match error {
+        crate::database::DatabaseError::InvalidUploadSelection => {
+            "请选择 1 至 500 张不重复的截图。".to_string()
+        }
+        crate::database::DatabaseError::CaptureNotFound => {
+            "选择中包含已经删除的截图，请刷新后重试。".to_string()
+        }
+        crate::database::DatabaseError::UploadAlreadyInProgress => {
+            "已有一个后台上传批次正在运行。".to_string()
+        }
+        _ => "无法创建上传批次。".to_string(),
+    })?;
     let progress = load_upload_progress(pool.inner(), batch.id).await?;
     let background_pool = pool.inner().clone();
     tauri::async_runtime::spawn(async move {
@@ -918,6 +982,11 @@ pub async fn upload_selected_captures(
         }
     });
     Ok(progress)
+}
+
+#[tauri::command]
+pub async fn sync_today_now(app: AppHandle, pool: State<'_, SqlitePool>) -> Result<(), String> {
+    crate::auto_sync::start_now(app, pool.inner().clone()).await
 }
 
 #[tauri::command]
@@ -952,7 +1021,6 @@ mod tests {
         let settings = CaptureSettings::default();
         assert_eq!(settings.interval_minutes, 5);
         assert_eq!(settings.idle_pause_minutes, 10);
-        assert!(settings.skip_duplicates);
         assert!(settings.validate().is_ok());
     }
 
@@ -1054,5 +1122,19 @@ mod tests {
         let snapshot = runtime.snapshot().unwrap();
         assert_eq!(snapshot.today_count, 0);
         assert_eq!(snapshot.local_storage_bytes, 0);
+    }
+
+    #[test]
+    fn skipping_a_duplicate_reschedules_without_changing_inventory() {
+        let runtime = RuntimeState::from_permission_result(Ok(PermissionState::Granted));
+        runtime.set_inventory(2, 600);
+        let (_, generation, _) = runtime.set_state(RecordingState::Running).unwrap();
+
+        assert!(runtime.capture_skipped(generation).is_some());
+        let snapshot = runtime.snapshot().unwrap();
+        assert_eq!(snapshot.today_count, 2);
+        assert_eq!(snapshot.local_storage_bytes, 600);
+        assert!(snapshot.next_capture_at.is_some());
+        assert!(matches!(snapshot.state, RecordingState::Running));
     }
 }

@@ -34,6 +34,8 @@ pub struct SaveRemoteProfileInput {
     pub private_key_passphrase: Option<String>,
     pub host_key_fingerprint: String,
     pub remote_root: String,
+    pub auto_sync_enabled: bool,
+    pub sync_interval_minutes: u16,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,6 +49,14 @@ pub struct RemoteProfile {
     pub host_key_fingerprint: String,
     pub remote_root: String,
     pub has_passphrase: bool,
+    pub auto_sync_enabled: bool,
+    pub sync_interval_minutes: u16,
+    pub next_auto_sync_at_utc: Option<String>,
+    pub last_auto_sync_attempt_at_utc: Option<String>,
+    pub last_auto_sync_state: Option<String>,
+    pub last_auto_sync_completed_items: usize,
+    pub last_auto_sync_failed_items: usize,
+    pub auto_sync_suspended_reason: Option<String>,
 }
 
 impl TryFrom<RemoteProfileRecord> for RemoteProfile {
@@ -62,6 +72,19 @@ impl TryFrom<RemoteProfileRecord> for RemoteProfile {
             host_key_fingerprint: value.host_key_fingerprint,
             remote_root: value.remote_root,
             has_passphrase: value.has_passphrase,
+            auto_sync_enabled: value.auto_sync_enabled,
+            sync_interval_minutes: u16::try_from(value.sync_interval_minutes)
+                .map_err(|_| UploadError::InvalidProfile)?,
+            next_auto_sync_at_utc: value.next_auto_sync_at_utc.map(|date| date.to_rfc3339()),
+            last_auto_sync_attempt_at_utc: value
+                .last_auto_sync_attempt_at_utc
+                .map(|date| date.to_rfc3339()),
+            last_auto_sync_state: value.last_auto_sync_state,
+            last_auto_sync_completed_items: usize::try_from(value.last_auto_sync_completed_items)
+                .map_err(|_| UploadError::InvalidProfile)?,
+            last_auto_sync_failed_items: usize::try_from(value.last_auto_sync_failed_items)
+                .map_err(|_| UploadError::InvalidProfile)?,
+            auto_sync_suspended_reason: value.auto_sync_suspended_reason,
         })
     }
 }
@@ -148,6 +171,7 @@ pub fn validate_profile_input(
         || !valid_host(&input.host)
         || !valid_username(&input.username)
         || !valid_fingerprint(&input.host_key_fingerprint)
+        || !matches!(input.sync_interval_minutes, 15 | 30 | 60 | 120 | 240)
     {
         return Err(UploadError::InvalidProfile);
     }

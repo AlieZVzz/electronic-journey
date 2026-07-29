@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { desktopApi } from "../api/desktop";
+import {
+  recordingSuccessMessage,
+  type RuntimeAction,
+} from "../lib/interactionFeedback";
 import type {
   AppSnapshot,
   CaptureSettings,
@@ -10,7 +14,11 @@ import type {
 interface AppRuntime {
   snapshot: AppSnapshot | null;
   loading: boolean;
+  pendingAction: RuntimeAction | null;
+  recordingTarget: RecordingState | null;
   error: string | null;
+  notice: string | null;
+  dismissNotice: () => void;
   requestScreenCapturePermission: () => Promise<AppSnapshot>;
   setRecordingState: (state: RecordingState) => Promise<void>;
   updateSettings: (settings: CaptureSettings) => Promise<void>;
@@ -21,7 +29,11 @@ export function useAppRuntime(): AppRuntime {
     desktopApi.initialSnapshot(),
   );
   const [loading, setLoading] = useState(true);
+  const [pendingAction, setPendingAction] = useState<RuntimeAction | null>(null);
+  const [recordingTarget, setRecordingTarget] =
+    useState<RecordingState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -131,20 +143,44 @@ export function useAppRuntime(): AppRuntime {
     return () => window.clearInterval(timer);
   }, [snapshot?.state]);
 
+  useEffect(() => {
+    if (!desktopApi.isDesktopRuntime() || snapshot?.state === "running") {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      desktopApi
+        .getSnapshot()
+        .then((value) => {
+          setSnapshot(value);
+          setError(null);
+        })
+        .catch((reason: unknown) => setError(String(reason)));
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [snapshot?.state]);
+
   const setRecordingState = useCallback(async (state: RecordingState) => {
     setLoading(true);
+    setPendingAction("recording");
+    setRecordingTarget(state);
+    setNotice(null);
     try {
       setSnapshot(await desktopApi.setRecordingState(state));
       setError(null);
+      setNotice(recordingSuccessMessage(state));
     } catch (reason) {
       setError(String(reason));
     } finally {
+      setRecordingTarget(null);
+      setPendingAction(null);
       setLoading(false);
     }
   }, []);
 
   const requestScreenCapturePermission = useCallback(async () => {
     setLoading(true);
+    setPendingAction("permission");
+    setNotice(null);
     try {
       const nextSnapshot = await desktopApi.requestScreenCapturePermission();
       setSnapshot(nextSnapshot);
@@ -154,18 +190,23 @@ export function useAppRuntime(): AppRuntime {
       setError(String(reason));
       throw reason;
     } finally {
+      setPendingAction(null);
       setLoading(false);
     }
   }, []);
 
   const updateSettings = useCallback(async (settings: CaptureSettings) => {
     setLoading(true);
+    setPendingAction("settings");
+    setNotice(null);
     try {
       setSnapshot(await desktopApi.updateSettings(settings));
       setError(null);
+      setNotice("设置已保存，并已应用到后续截图。");
     } catch (reason) {
       setError(String(reason));
     } finally {
+      setPendingAction(null);
       setLoading(false);
     }
   }, []);
@@ -173,7 +214,11 @@ export function useAppRuntime(): AppRuntime {
   return {
     snapshot,
     loading,
+    pendingAction,
+    recordingTarget,
     error,
+    notice,
+    dismissNotice: () => setNotice(null),
     requestScreenCapturePermission,
     setRecordingState,
     updateSettings,

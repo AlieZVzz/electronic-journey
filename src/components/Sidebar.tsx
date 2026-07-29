@@ -61,6 +61,7 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
         {navigation.map((item) => (
           <button
             className={activePage === item.id ? "nav-item is-active" : "nav-item"}
+            aria-current={activePage === item.id ? "page" : undefined}
             key={item.id}
             onClick={() => onNavigate(item.id)}
             type="button"
@@ -80,7 +81,7 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
         </span>
         <div>
           <strong>本地资料库</strong>
-          <p>仅本机 · 不自动上传</p>
+          <p>默认仅本机 · 同步可选</p>
         </div>
       </div>
     </aside>

@@ -89,7 +89,7 @@ electronic-journey/
 - 不建设自有图片云端、对象存储或 LLM 图片中转服务。
 - 只有在用户选择图片并确认后，Rust 客户端才会通过 SFTP 上传到已配置的个人服务器文件夹。
 - 客户端不配置或感知远端 Hermes、提示词、模型和其他图片消费者。
-- 不提供自动上传开关。
+- 自动同步默认关闭；只有用户在远程存储中显式开启后，才会按设定间隔同步当天未同步图片。
 
 完整设计、阶段和验收标准见
 [`electronic-journey-design.md`](electronic-journey-design.md)。

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{
     capture::CapturedImage,
     database::{self, CaptureFileRecord, NewCaptureRecord},
-    vault,
+    image_fingerprint, vault,
 };
 
 const MAXIMUM_CAPTURE_LENGTH: u64 = 128 * 1024 * 1024;
@@ -20,6 +20,12 @@ const THUMBNAIL_MAX_WIDTH: u32 = 1440;
 #[derive(Debug)]
 pub struct StoredCapture {
     pub storage_size: u64,
+}
+
+#[derive(Debug)]
+pub enum PersistCaptureOutcome {
+    Stored(StoredCapture),
+    SkippedDuplicate,
 }
 
 pub struct DeletedCapture {
@@ -66,8 +72,12 @@ pub async fn persist_capture(
     display_id: &str,
     captured_at_utc: DateTime<Utc>,
     timezone: &str,
-) -> Result<StoredCapture, CapturePipelineError> {
-    let (original, thumbnail) = encode_webp_variants(captured)?;
+) -> Result<PersistCaptureOutcome, CapturePipelineError> {
+    let (image, pixel_sha256) = prepare_capture(captured)?;
+    if should_skip_duplicate(pool, "local", display_id, &pixel_sha256).await? {
+        return Ok(PersistCaptureOutcome::SkippedDuplicate);
+    }
+    let (original, thumbnail) = encode_webp_variants(&image)?;
     let capture_id = Uuid::new_v4();
     let data_dir = app
         .path()
@@ -118,15 +128,28 @@ pub async fn persist_capture(
             thumbnail_path: stored_thumbnail_path,
             file_size: original.len() as u64,
             content_sha256: &content_sha256,
+            pixel_sha256: Some(&pixel_sha256),
             thumbnail_state,
         },
     )
     .await
     .map_err(|_| CapturePipelineError::Database)?;
 
-    Ok(StoredCapture {
+    Ok(PersistCaptureOutcome::Stored(StoredCapture {
         storage_size: original.len() as u64 + thumbnail_size,
-    })
+    }))
+}
+
+async fn should_skip_duplicate(
+    pool: &SqlitePool,
+    device_id: &str,
+    display_id: &str,
+    pixel_sha256: &str,
+) -> Result<bool, CapturePipelineError> {
+    let latest = database::latest_capture_pixel_sha256(pool, device_id, display_id)
+        .await
+        .map_err(|_| CapturePipelineError::Database)?;
+    Ok(matches!(latest, Some(Some(latest)) if latest == pixel_sha256))
 }
 
 pub fn read_saved_capture(
@@ -459,19 +482,24 @@ fn inventory_directory(
     Ok(())
 }
 
-fn encode_webp_variants(
+fn prepare_capture(
     captured: CapturedImage,
-) -> Result<(Vec<u8>, Vec<u8>), CapturePipelineError> {
-    let mut image =
-        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(captured.width, captured.height, captured.rgba)
+) -> Result<(DynamicImage, String), CapturePipelineError> {
+    let mut rgba = captured.rgba;
+    let pixel_sha256 =
+        image_fingerprint::normalize_alpha_and_hash(captured.width, captured.height, &mut rgba)
             .ok_or(CapturePipelineError::InvalidPixels)?;
-    for pixel in image.pixels_mut() {
-        pixel.0[3] = u8::MAX;
-    }
-    let original = DynamicImage::ImageRgba8(image);
+    let image = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(captured.width, captured.height, rgba)
+        .ok_or(CapturePipelineError::InvalidPixels)?;
+    Ok((DynamicImage::ImageRgba8(image), pixel_sha256))
+}
+
+fn encode_webp_variants(
+    original: &DynamicImage,
+) -> Result<(Vec<u8>, Vec<u8>), CapturePipelineError> {
     let thumbnail = resize_to_max_width(original.clone(), THUMBNAIL_MAX_WIDTH);
     Ok((
-        encode_dynamic_webp(&original)?,
+        encode_dynamic_webp(original)?,
         encode_dynamic_webp(&thumbnail)?,
     ))
 }
@@ -507,6 +535,7 @@ fn thumbnail_from_webp(encoded: &[u8]) -> Result<Vec<u8>, CapturePipelineError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
 
     fn solid_capture(width: u32, height: u32) -> CapturedImage {
         CapturedImage {
@@ -522,6 +551,16 @@ mod tests {
         path
     }
 
+    async fn migrated_memory_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
     #[test]
     fn encoding_rejects_an_invalid_pixel_buffer() {
         let captured = CapturedImage {
@@ -531,9 +570,49 @@ mod tests {
         };
 
         assert!(matches!(
-            encode_webp_variants(captured),
+            prepare_capture(captured),
             Err(CapturePipelineError::InvalidPixels)
         ));
+    }
+
+    #[tokio::test]
+    async fn duplicate_detection_uses_only_the_latest_capture_on_the_same_display() {
+        let pool = migrated_memory_pool().await;
+        let capture_id = Uuid::new_v4();
+        database::insert_capture(
+            &pool,
+            &NewCaptureRecord {
+                id: capture_id,
+                device_id: "local",
+                display_id: "primary",
+                captured_at_utc: Utc::now(),
+                timezone: "Asia/Singapore",
+                local_path: "captures/existing.webp",
+                thumbnail_path: None,
+                file_size: 10,
+                content_sha256: "container",
+                pixel_sha256: Some("exact-pixels"),
+                thumbnail_state: "pending",
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            should_skip_duplicate(&pool, "local", "primary", "exact-pixels")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !should_skip_duplicate(&pool, "local", "primary", "changed-pixels")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !should_skip_duplicate(&pool, "local", "secondary", "exact-pixels")
+                .await
+                .unwrap()
+        );
     }
 
     #[test]
@@ -543,7 +622,8 @@ mod tests {
             height: 2,
             rgba: vec![255; 4 * 2 * 4],
         };
-        let (encoded, thumbnail) = encode_webp_variants(captured).unwrap();
+        let (image, _) = prepare_capture(captured).unwrap();
+        let (encoded, thumbnail) = encode_webp_variants(&image).unwrap();
         let decoded =
             image::load_from_memory_with_format(&encoded, image::ImageFormat::WebP).unwrap();
         let decoded_thumbnail =
@@ -562,7 +642,8 @@ mod tests {
             height: 1,
             rgba: vec![12, 34, 56, 0, 78, 90, 123, 128],
         };
-        let (encoded, thumbnail) = encode_webp_variants(captured).unwrap();
+        let (image, _) = prepare_capture(captured).unwrap();
+        let (encoded, thumbnail) = encode_webp_variants(&image).unwrap();
         let decoded = image::load_from_memory_with_format(&encoded, image::ImageFormat::WebP)
             .unwrap()
             .to_rgba8();
@@ -580,7 +661,8 @@ mod tests {
     #[test]
     fn encoding_creates_a_bounded_thumbnail() {
         let captured = solid_capture(2880, 1620);
-        let (encoded, thumbnail) = encode_webp_variants(captured).unwrap();
+        let (image, _) = prepare_capture(captured).unwrap();
+        let (encoded, thumbnail) = encode_webp_variants(&image).unwrap();
         let decoded =
             image::load_from_memory_with_format(&encoded, image::ImageFormat::WebP).unwrap();
         let decoded_thumbnail =
@@ -598,7 +680,8 @@ mod tests {
         let directory = temporary_test_directory();
         let valid_path = directory.join("valid.webp");
         let invalid_path = directory.join("invalid.webp");
-        let (encoded, _) = encode_webp_variants(solid_capture(4, 2)).unwrap();
+        let (image, _) = prepare_capture(solid_capture(4, 2)).unwrap();
+        let (encoded, _) = encode_webp_variants(&image).unwrap();
         std::fs::write(&valid_path, &encoded).unwrap();
         std::fs::write(&invalid_path, b"not an image").unwrap();
 
@@ -695,7 +778,8 @@ mod tests {
         let directory = temporary_test_directory();
         let target_path = directory.join("target.webp");
         let link_path = directory.join("link.webp");
-        let (encoded, _) = encode_webp_variants(solid_capture(4, 2)).unwrap();
+        let (image, _) = prepare_capture(solid_capture(4, 2)).unwrap();
+        let (encoded, _) = encode_webp_variants(&image).unwrap();
         std::fs::write(&target_path, encoded).unwrap();
         symlink(&target_path, &link_path).unwrap();
 

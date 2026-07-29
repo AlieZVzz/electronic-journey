@@ -11,7 +11,10 @@ use tauri::{AppHandle, Manager};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::database::{self, DatabaseError, NewCaptureRecord};
+use crate::{
+    database::{self, DatabaseError, NewCaptureRecord},
+    image_fingerprint,
+};
 
 const MAX_CAPTURE_LENGTH: u64 = 128 * 1024 * 1024;
 
@@ -178,11 +181,16 @@ async fn index_capture_path(
         return Ok(false);
     }
     let bytes = std::fs::read(path).map_err(|_| TimelineError::Inventory)?;
-    if !matches!(image::guess_format(&bytes), Ok(image::ImageFormat::WebP))
-        || image::load_from_memory_with_format(&bytes, image::ImageFormat::WebP).is_err()
-    {
+    if !matches!(image::guess_format(&bytes), Ok(image::ImageFormat::WebP)) {
         return Ok(false);
     }
+    let Ok(decoded) = image::load_from_memory_with_format(&bytes, image::ImageFormat::WebP) else {
+        return Ok(false);
+    };
+    let mut rgba = decoded.to_rgba8();
+    let pixel_sha256 =
+        image_fingerprint::normalize_alpha_and_hash(rgba.width(), rgba.height(), rgba.as_mut())
+            .ok_or(TimelineError::Inventory)?;
     let relative_path = managed_relative_path(data_dir, path).ok_or(TimelineError::Inventory)?;
     let thumbnail_path = matching_thumbnail(data_dir, &relative_path, capture_id);
     let captured_at_utc = metadata
@@ -203,6 +211,7 @@ async fn index_capture_path(
             thumbnail_path: thumbnail_path.as_deref(),
             file_size: metadata.len(),
             content_sha256: &content_sha256,
+            pixel_sha256: Some(&pixel_sha256),
             thumbnail_state: if thumbnail_path.is_some() {
                 "ready"
             } else {

@@ -11,6 +11,7 @@ test_remote_profile()
 upload_selected_captures(capture_ids)
 get_upload_batch_status(batch_id)
 get_active_upload_batch()
+sync_today_now()
 ```
 
 - `get_remote_profile` 返回脱敏配置和 `hasPassphrase`，不返回口令。
@@ -21,5 +22,6 @@ get_active_upload_batch()
 - `upload_selected_captures` 只接受 1 至 500 个截图 UUID；Rust 从 SQLite 获取受控本地路径和确定性远端路径，创建后台批次后立即返回，不等待 SFTP 完成。
 - `get_upload_batch_status` 返回批次状态、实时成功/失败数量、逐项状态和脱敏错误。
 - `get_active_upload_batch` 用于页面重新进入后恢复进度跟踪；同一时刻只允许一个 `pending` 或 `uploading` 批次。
+- `sync_today_now` 仅在用户已显式启用自动同步且计划未因安全错误暂停时创建当天同步任务；截图范围完全由 Rust 从 SQLite 筛选。
 
 前端不能传入图片本地路径、远端最终文件名、任意 shell 命令、私钥正文、Hermes 配置、提示词或模型参数。浏览器 fallback 对读取指纹、保存、测试和上传均必须明确失败，不能模拟成功。

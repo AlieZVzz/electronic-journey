@@ -29,7 +29,11 @@ export default function App() {
   const {
     snapshot,
     loading,
+    pendingAction,
+    recordingTarget,
     error,
+    notice,
+    dismissNotice,
     requestScreenCapturePermission,
     setRecordingState,
     updateSettings,
@@ -47,9 +51,14 @@ export default function App() {
     setOnboardingComplete(true);
   }
 
+  function navigate(page: PageId) {
+    dismissNotice();
+    setActivePage(page);
+  }
+
   return (
     <div className="app-shell">
-      <Sidebar activePage={activePage} onNavigate={setActivePage} />
+      <Sidebar activePage={activePage} onNavigate={navigate} />
       <section className="workspace">
         <header className="titlebar" data-tauri-drag-region>
           <strong data-tauri-drag-region>{pageTitles[activePage]}</strong>
@@ -57,6 +66,18 @@ export default function App() {
         <main className="main-content">
           <div className="content-frame">
             {visibleError && <div className="error-banner">{visibleError}</div>}
+            {notice && (
+              <div className="success-banner app-feedback" role="status">
+                <span>{notice}</span>
+                <button
+                  aria-label="关闭操作提示"
+                  onClick={dismissNotice}
+                  type="button"
+                >
+                  ×
+                </button>
+              </div>
+            )}
             {!snapshot ? (
               <div className="loading-state">正在读取本机状态…</div>
             ) : (
@@ -64,6 +85,8 @@ export default function App() {
                 {activePage === "today" && (
                   <TodayPage
                     loading={loading}
+                    pendingAction={pendingAction}
+                    recordingTarget={recordingTarget}
                     onPermissionRequest={requestScreenCapturePermission}
                     onStateChange={setRecordingState}
                     snapshot={snapshot}
@@ -73,6 +96,7 @@ export default function App() {
                 {activePage === "privacy" && (
                   <PrivacyPage
                     loading={loading}
+                    pendingAction={pendingAction}
                     onSave={updateSettings}
                     settings={snapshot.settings}
                   />

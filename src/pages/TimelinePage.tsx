@@ -137,7 +137,11 @@ export function TimelinePage() {
   const [captures, setCaptures] = useState<TimelineCapture[]>([]);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingAction, setLoadingAction] = useState<
+    "initial" | "refresh" | "more" | null
+  >("initial");
   const [error, setError] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     capture: TimelineCapture;
@@ -174,6 +178,12 @@ export function TimelinePage() {
     previewScale === "pixel"
       ? 1 / Math.max(1, window.devicePixelRatio)
       : previewScale;
+  const numericPreviewScale =
+    previewScale === "fit"
+      ? null
+      : previewScale === "pixel"
+        ? 1 / Math.max(1, window.devicePixelRatio)
+        : previewScale;
 
   const trimPreviewCache = useCallback(() => {
     const cache = previewCacheRef.current;
@@ -234,28 +244,56 @@ export function TimelinePage() {
     [trimPreviewCache],
   );
 
-  const loadPage = useCallback(async (offset: number, replace: boolean) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const page = await desktopApi.listTimelineCaptures(offset);
-      setCaptures((current) => {
+  const loadPage = useCallback(
+    async (
+      offset: number,
+      replace: boolean,
+      action: "initial" | "refresh" | "more",
+    ) => {
+      setLoading(true);
+      setLoadingAction(action);
+      setError(null);
+      setActionMessage(null);
+      try {
+        const page = await desktopApi.listTimelineCaptures(offset);
+        setCaptures((current) => {
+          if (replace) {
+            return page.items;
+          }
+          const known = new Set(current.map(({ id }) => id));
+          return [
+            ...current,
+            ...page.items.filter(({ id }) => !known.has(id)),
+          ];
+        });
         if (replace) {
-          return page.items;
+          const visibleIds = new Set(page.items.map(({ id }) => id));
+          setSelectedIds(
+            (current) =>
+              new Set(Array.from(current).filter((id) => visibleIds.has(id))),
+          );
         }
-        const known = new Set(current.map(({ id }) => id));
-        return [
-          ...current,
-          ...page.items.filter(({ id }) => !known.has(id)),
-        ];
-      });
-      setNextOffset(page.nextOffset);
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+        setNextOffset(page.nextOffset);
+        if (action === "refresh") {
+          setActionMessage(
+            `时间线已刷新，当前显示 ${page.items.length} 张记录。`,
+          );
+        } else if (action === "more") {
+          setActionMessage(
+            page.items.length > 0
+              ? `已加载 ${page.items.length} 张更早的记录。`
+              : "没有更早的记录了。",
+          );
+        }
+      } catch (reason) {
+        setError(String(reason));
+      } finally {
+        setLoading(false);
+        setLoadingAction(null);
+      }
+    },
+    [],
+  );
 
   const applyUploadProgress = useCallback(
     (progress: UploadBatchProgress) => {
@@ -275,7 +313,7 @@ export function TimelinePage() {
   );
 
   useEffect(() => {
-    void loadPage(0, true);
+    void loadPage(0, true, "initial");
   }, [loadPage]);
 
   useEffect(() => {
@@ -303,6 +341,38 @@ export function TimelinePage() {
       active = false;
     };
   }, [applyUploadProgress]);
+
+  useEffect(() => {
+    if (uploadActive || !desktopApi.isDesktopRuntime()) {
+      return;
+    }
+    let active = true;
+    const timer = window.setInterval(() => {
+      void desktopApi
+        .getActiveUploadBatch()
+        .then((progress) => {
+          if (!active || !progress) {
+            return;
+          }
+          setUploadProgress(progress);
+          applyUploadProgress(progress);
+          setUploadMessage(
+            `检测到后台上传：已处理 ${
+              progress.uploadedItems + progress.failedItems
+            } / ${progress.totalItems} 张。`,
+          );
+        })
+        .catch((reason) => {
+          if (active) {
+            setError(String(reason));
+          }
+        });
+    }, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [applyUploadProgress, uploadActive]);
 
   useEffect(() => {
     if (!uploadActive || !uploadProgress) {
@@ -539,6 +609,9 @@ export function TimelinePage() {
         current === null ? null : Math.max(0, current - 1),
       );
       setDeleteCandidate(null);
+      setActionMessage(
+        `${formatTime(capture.capturedAtUtc)} 的本地截图已删除并完成验证。`,
+      );
       window.dispatchEvent(
         new Event("electronic-journey:snapshot-changed"),
       );
@@ -618,7 +691,7 @@ export function TimelinePage() {
         new Event("electronic-journey:snapshot-changed"),
       );
     } catch (reason) {
-      await loadPage(0, true);
+      await loadPage(0, true, "refresh");
       setError(String(reason));
     } finally {
       setStartingUpload(false);
@@ -634,7 +707,7 @@ export function TimelinePage() {
           <p>按当前系统时区排列；缩略图和原图都从本地读取。</p>
         </div>
         <div className="timeline-header__actions">
-          <span>
+          <span aria-live="polite">
             {selectedIds.size > 0
               ? `已选 ${selectedIds.size} 张`
               : "尚未选择"}
@@ -652,6 +725,7 @@ export function TimelinePage() {
           </button>
           <button
             className="button button--primary"
+            aria-busy={startingUpload}
             disabled={
               selectedIds.size === 0 || uploadActive || startingUpload
             }
@@ -669,11 +743,12 @@ export function TimelinePage() {
           </button>
           <button
             className="button button--ghost"
+            aria-busy={loadingAction === "refresh"}
             disabled={loading}
-            onClick={() => void loadPage(0, true)}
+            onClick={() => void loadPage(0, true, "refresh")}
             type="button"
           >
-            刷新
+            {loadingAction === "refresh" ? "正在刷新…" : "刷新"}
           </button>
         </div>
       </header>
@@ -783,8 +858,9 @@ export function TimelinePage() {
         <div className="timeline-more">
           <button
             className="button button--ghost"
+            aria-busy={loadingAction === "more"}
             disabled={loading}
-            onClick={() => void loadPage(nextOffset, false)}
+            onClick={() => void loadPage(nextOffset, false, "more")}
             type="button"
           >
             {loading ? "正在载入…" : "加载更早的记录"}
@@ -792,9 +868,9 @@ export function TimelinePage() {
         </div>
       )}
 
-      {(uploadConfirmation || uploadMessage) && (
+      {(uploadConfirmation || uploadMessage || actionMessage) && (
         <aside
-          aria-label="上传提示"
+          aria-label="操作提示"
           className="upload-toast-region"
         >
           {uploadConfirmation && (
@@ -828,7 +904,14 @@ export function TimelinePage() {
             </div>
           )}
           {uploadMessage && (
-            <div className="upload-progress-toast" role="status">
+            <div
+              className={`upload-progress-toast ${
+                !uploadActive && (uploadProgress?.failedItems ?? 0) > 0
+                  ? "is-warning"
+                  : ""
+              }`}
+              role="status"
+            >
               <span>{uploadMessage}</span>
               {!uploadActive && (
                 <button
@@ -839,6 +922,18 @@ export function TimelinePage() {
                   ×
                 </button>
               )}
+            </div>
+          )}
+          {actionMessage && (
+            <div className="upload-progress-toast" role="status">
+              <span>{actionMessage}</span>
+              <button
+                aria-label="关闭操作提示"
+                onClick={() => setActionMessage(null)}
+                type="button"
+              >
+                ×
+              </button>
             </div>
           )}
         </aside>
@@ -1064,7 +1159,11 @@ export function TimelinePage() {
               <div className="preview-dialog__controls">
                 <button
                   aria-label="缩小截图"
-                  disabled={!preview.decoded}
+                  disabled={
+                    !preview.decoded ||
+                    (numericPreviewScale !== null &&
+                      numericPreviewScale <= 0.25)
+                  }
                   onClick={() => zoomPreview(-0.25)}
                   type="button"
                 >
@@ -1072,6 +1171,7 @@ export function TimelinePage() {
                 </button>
                 <button
                   className={previewScale === "fit" ? "is-active" : ""}
+                  aria-pressed={previewScale === "fit"}
                   disabled={!preview.decoded}
                   onClick={() => setPreviewScale("fit")}
                   type="button"
@@ -1080,6 +1180,7 @@ export function TimelinePage() {
                 </button>
                 <button
                   className={previewScale === "pixel" ? "is-active" : ""}
+                  aria-pressed={previewScale === "pixel"}
                   disabled={!preview.decoded}
                   onClick={() => setPreviewScale("pixel")}
                   type="button"
@@ -1088,6 +1189,7 @@ export function TimelinePage() {
                 </button>
                 <button
                   className={previewScale === 1 ? "is-active" : ""}
+                  aria-pressed={previewScale === 1}
                   disabled={!preview.decoded}
                   onClick={() => setPreviewScale(1)}
                   type="button"
@@ -1096,7 +1198,10 @@ export function TimelinePage() {
                 </button>
                 <button
                   aria-label="放大截图"
-                  disabled={!preview.decoded}
+                  disabled={
+                    !preview.decoded ||
+                    (numericPreviewScale !== null && numericPreviewScale >= 2)
+                  }
                   onClick={() => zoomPreview(0.25)}
                   type="button"
                 >
