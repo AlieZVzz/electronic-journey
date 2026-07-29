@@ -17,31 +17,44 @@ interface AppRuntime {
 }
 
 export function useAppRuntime(): AppRuntime {
-  const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<AppSnapshot | null>(() =>
+    desktopApi.initialSnapshot(),
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
 
-    desktopApi
-      .getSnapshot()
-      .then((value) => {
+    async function loadRuntime() {
+      try {
+        const cachedSnapshot = await desktopApi.getSnapshot();
         if (active) {
-          setSnapshot(value);
+          setSnapshot(cachedSnapshot);
           setError(null);
         }
-      })
-      .catch((reason: unknown) => {
+
+        if (!desktopApi.isDesktopRuntime()) {
+          return;
+        }
+        const refreshedSnapshot =
+          await desktopApi.refreshScreenCapturePermission();
+        if (active) {
+          setSnapshot(refreshedSnapshot);
+          setError(null);
+        }
+      } catch (reason: unknown) {
         if (active) {
           setError(String(reason));
         }
-      })
-      .finally(() => {
+      } finally {
         if (active) {
           setLoading(false);
         }
-      });
+      }
+    }
+
+    void loadRuntime();
 
     return () => {
       active = false;
@@ -54,6 +67,15 @@ export function useAppRuntime(): AppRuntime {
     }
 
     const refreshPermission = () => {
+      desktopApi
+        .refreshScreenCapturePermission()
+        .then((value) => {
+          setSnapshot(value);
+          setError(null);
+        })
+        .catch((reason: unknown) => setError(String(reason)));
+    };
+    const refreshSnapshot = () => {
       desktopApi
         .getSnapshot()
         .then((value) => {
@@ -69,6 +91,10 @@ export function useAppRuntime(): AppRuntime {
     };
 
     window.addEventListener("focus", refreshPermission);
+    window.addEventListener(
+      "electronic-journey:snapshot-changed",
+      refreshSnapshot,
+    );
     document.addEventListener(
       "visibilitychange",
       refreshPermissionWhenVisible,
@@ -76,6 +102,10 @@ export function useAppRuntime(): AppRuntime {
 
     return () => {
       window.removeEventListener("focus", refreshPermission);
+      window.removeEventListener(
+        "electronic-journey:snapshot-changed",
+        refreshSnapshot,
+      );
       document.removeEventListener(
         "visibilitychange",
         refreshPermissionWhenVisible,

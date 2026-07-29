@@ -1,16 +1,16 @@
 # Electronic Journey
 
-Electronic Journey 是一款面向个人用户的数字旅程记录工具。它将在用户明确授权并主动开启后，按计划截取所选显示器，并在离开本机前完成认证加密。
+Electronic Journey 是一款面向个人用户的数字旅程记录工具。它将在用户明确授权并主动开启后，按计划截取所选显示器，在本机保存原图和缩略图，并计划支持由用户明确选择图片后从客户端直连 LLM 提供商。
 
-当前仓库处于 `0.1.0` 初始化阶段：React 界面、Tauri IPC、Rust 核心模块边界、SQLite/PostgreSQL 初始迁移和 Axum 健康检查已经建立；真实平台截图、安全密钥存储、托盘与云同步尚未实现。
+当前 macOS 原型已接通屏幕录制权限、主显示器截图、普通 WebP 与缩略图原子写入、SQLite 时间线和启动索引恢复。Windows 捕获、锁屏/休眠监听、托盘和客户端直连 LLM 仍待实现。
 
 ## 技术栈
 
 - Tauri 2 + Rust
 - React 19 + TypeScript + Vite 6
 - SQLite + `sqlx`
-- XChaCha20-Poly1305
-- Axum + PostgreSQL
+- macOS Keychain / Windows DPAPI（用于未来的 LLM 凭据）
+- Rust `reqwest`（用于未来的客户端 LLM 适配器）
 
 ## 环境要求
 
@@ -31,7 +31,7 @@ scripts/init.sh
 
 ## 本地开发
 
-浏览器中运行界面（使用安全的本地演示状态，不执行截图或上传）：
+浏览器中运行界面（使用安全的本地演示状态，不执行截图、文件读取或 LLM 请求）：
 
 ```bash
 npm run dev
@@ -57,12 +57,6 @@ open "target/debug/bundle/macos/Electronic Journey.app"
 tccutil reset ScreenCapture com.electronicjourney.app
 ```
 
-运行控制面 API：
-
-```bash
-npm run server:dev
-```
-
 运行检查：
 
 ```bash
@@ -78,7 +72,7 @@ electronic-journey/
 │   ├── capabilities/       # 最小权限能力声明
 │   ├── migrations/
 │   └── src/
-├── server/                 # Axum 控制面 API 与 PostgreSQL 迁移
+├── server/                 # 早期云同步原型；当前产品路径不使用
 ├── docs/                   # 长期架构、安全、接口与协作文档
 ├── tasks/                  # 待办、进行中与完成记录
 ├── memory/                 # 长期背景、决策和经验
@@ -90,10 +84,11 @@ electronic-journey/
 ## 隐私边界
 
 - 不隐蔽运行，不隐藏托盘图标，不绕过系统截图授权。
-- 默认只保存加密的 `.ejourney` 文件。
+- 新截图默认只在本机保存普通 WebP 原图和缩略图。
 - 不记录键盘、剪贴板、浏览器历史、麦克风或窗口文本。
-- 云端不持有明文主密钥，不生成明文缩略图，不分析截图内容。
-- 当前初始化版本不会执行真实截图，也不会上传任何数据。
+- 不建设自有图片云端、对象存储或 LLM 图片中转服务。
+- 未来只有在用户选择图片并确认后，Rust 客户端才会直连已配置的 LLM 提供商。
+- 当前版本不会把截图发送给任何 LLM 提供商。
 
 完整设计、阶段和验收标准见
 [`electronic-journey-design.md`](electronic-journey-design.md)。

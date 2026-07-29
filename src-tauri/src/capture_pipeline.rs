@@ -1,39 +1,36 @@
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use image::{imageops::FilterType, DynamicImage, ImageBuffer, ImageEncoder, Rgba};
-#[cfg(target_os = "macos")]
-use rand::{rngs::OsRng, RngCore};
-#[cfg(target_os = "macos")]
-use security_framework::passwords::{get_generic_password, set_generic_password};
 use sha2::{Digest, Sha256};
+use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager};
 use thiserror::Error;
 use uuid::Uuid;
-use zeroize::Zeroize;
 
 use crate::{
     capture::CapturedImage,
-    commands::CaptureSettings,
-    crypto::{CryptoService, EncryptionKey},
+    database::{self, CaptureFileRecord, NewCaptureRecord},
     vault,
 };
 
-#[cfg(target_os = "macos")]
-const KEYCHAIN_SERVICE: &str = "com.electronicjourney.app";
-#[cfg(target_os = "macos")]
-const KEYCHAIN_ACCOUNT: &str = "local-vault-master-key-v1";
-const FILE_MAGIC: &[u8; 8] = b"EJOURNEY";
-const FILE_VERSION: u8 = 1;
-const KEY_VERSION: u32 = 1;
-const HEADER_LENGTH: usize = FILE_MAGIC.len() + 1 + 4 + 16;
-const NONCE_LENGTH: usize = 24;
-const MINIMUM_CONTAINER_LENGTH: usize = HEADER_LENGTH + NONCE_LENGTH + 16;
-const MAXIMUM_CONTAINER_LENGTH: u64 = 128 * 1024 * 1024;
+const MAXIMUM_CAPTURE_LENGTH: u64 = 128 * 1024 * 1024;
+const THUMBNAIL_MAX_WIDTH: u32 = 1440;
 
 #[derive(Debug)]
 pub struct StoredCapture {
-    pub cipher_size: u64,
+    pub storage_size: u64,
+}
+
+pub struct DeletedCapture {
+    pub storage_size: u64,
+    pub captured_at_utc: DateTime<Utc>,
+}
+
+struct StagedDeletion {
+    original_path: PathBuf,
+    staged_path: PathBuf,
+    size: u64,
 }
 
 #[derive(Debug, Error)]
@@ -42,171 +39,368 @@ pub enum CapturePipelineError {
     InvalidPixels,
     #[error("image encoding failed")]
     ImageEncoding,
-    #[error("local encryption key is unavailable")]
-    KeyUnavailable,
-    #[error("image encryption failed")]
-    Encryption,
     #[error("application data directory is unavailable")]
     DataDirectory,
-    #[error("encrypted capture could not be written")]
+    #[error("capture could not be written")]
     WriteFailed,
-    #[error("encrypted capture could not be read")]
+    #[error("capture could not be read")]
     ReadFailed,
-    #[error("encrypted capture container is invalid")]
+    #[error("capture file is invalid")]
     InvalidContainer,
-    #[error("encrypted capture authentication failed")]
-    AuthenticationFailed,
+    #[error("capture index could not be updated")]
+    Database,
+    #[error("capture is still referenced by an AI task")]
+    CaptureInUse,
+    #[error("capture does not exist")]
+    CaptureNotFound,
+    #[error("capture files could not be deleted")]
+    DeleteFailed,
+    #[error("capture deletion could not be fully verified")]
+    DeleteIncomplete,
 }
 
 pub async fn persist_capture(
     app: &AppHandle,
+    pool: &SqlitePool,
     captured: CapturedImage,
-    settings: &CaptureSettings,
+    display_id: &str,
+    captured_at_utc: DateTime<Utc>,
+    timezone: &str,
 ) -> Result<StoredCapture, CapturePipelineError> {
-    let encoded = encode_webp(captured, settings.max_width)?;
-    let key = load_or_create_key()?;
+    let (original, thumbnail) = encode_webp_variants(captured)?;
     let capture_id = Uuid::new_v4();
-    let container = encrypt_container(&key, capture_id, &encoded)?;
-
-    let captures_dir = app
+    let data_dir = app
         .path()
         .app_local_data_dir()
-        .map_err(|_| CapturePipelineError::DataDirectory)?
-        .join("vault")
-        .join("captures");
-    let destination = captures_dir.join(format!("{capture_id}.ejourney"));
-    vault::write_atomic(&destination, &container)
+        .map_err(|_| CapturePipelineError::DataDirectory)?;
+    let local_date = captured_at_utc.with_timezone(&Local);
+    let date_path = local_date.format("%Y/%m/%d");
+    let original_relative = format!("captures/{date_path}/{capture_id}.webp");
+    let thumbnail_relative = format!("thumbnails/{date_path}/{capture_id}.webp");
+    let original_path = data_dir.join(&original_relative);
+    let thumbnail_path = data_dir.join(&thumbnail_relative);
+
+    vault::write_atomic(&original_path, &original)
         .await
         .map_err(|_| CapturePipelineError::WriteFailed)?;
+    let (thumbnail_size, stored_thumbnail_path, thumbnail_state) =
+        match vault::write_atomic(&thumbnail_path, &thumbnail).await {
+            Ok(()) => (
+                thumbnail.len() as u64,
+                Some(thumbnail_relative.as_str()),
+                "ready",
+            ),
+            Err(_) => {
+                // The original is already durable and remains a valid capture.
+                // Timeline reads can derive a temporary thumbnail from it.
+                tracing::warn!(
+                    error_code = "thumbnail_write_failed",
+                    capture_id = %capture_id,
+                    "thumbnail could not be persisted"
+                );
+                (0, None, "failed")
+            }
+        };
 
-    // Calculate the digest now so the complete ciphertext has been read and
-    // validated by the same code path that will later populate SQLite.
-    let _cipher_sha256 = hex::encode(Sha256::digest(&container));
+    // Read and decode the durable original before reporting success. This
+    // keeps a partial or corrupt local write from becoming a successful item.
+    let verified = read_validated_webp(&original_path)?;
+    let content_sha256 = hex::encode(Sha256::digest(&verified));
+    database::insert_capture(
+        pool,
+        &NewCaptureRecord {
+            id: capture_id,
+            device_id: "local",
+            display_id,
+            captured_at_utc,
+            timezone,
+            local_path: &original_relative,
+            thumbnail_path: stored_thumbnail_path,
+            file_size: original.len() as u64,
+            content_sha256: &content_sha256,
+            thumbnail_state,
+        },
+    )
+    .await
+    .map_err(|_| CapturePipelineError::Database)?;
 
     Ok(StoredCapture {
-        cipher_size: container.len() as u64,
+        storage_size: original.len() as u64 + thumbnail_size,
     })
 }
 
-fn encrypt_container(
-    key: &EncryptionKey,
+pub fn read_saved_capture(
+    app: &AppHandle,
     capture_id: Uuid,
-    encoded: &[u8],
+    record: &CaptureFileRecord,
 ) -> Result<Vec<u8>, CapturePipelineError> {
-    let mut associated_data = Vec::with_capacity(FILE_MAGIC.len() + 1 + 4 + 16);
-    associated_data.extend_from_slice(FILE_MAGIC);
-    associated_data.push(FILE_VERSION);
-    associated_data.extend_from_slice(&KEY_VERSION.to_le_bytes());
-    associated_data.extend_from_slice(capture_id.as_bytes());
-    let encrypted = CryptoService::encrypt(&key, &encoded, &associated_data)
-        .map_err(|_| CapturePipelineError::Encryption)?;
+    let data_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| CapturePipelineError::DataDirectory)?;
+    let path = resolve_capture_path(
+        &data_dir,
+        &record.local_path,
+        capture_id,
+        "webp",
+        &["captures"],
+    )?;
+    read_integrity_checked_webp(&path, record.file_size, &record.content_sha256)
+}
 
-    let mut container = Vec::with_capacity(
-        associated_data.len() + encrypted.nonce.len() + encrypted.ciphertext.len(),
-    );
-    container.extend_from_slice(&associated_data);
-    container.extend_from_slice(&encrypted.nonce);
-    container.extend_from_slice(&encrypted.ciphertext);
+pub fn read_saved_thumbnail(
+    app: &AppHandle,
+    capture_id: Uuid,
+    record: &CaptureFileRecord,
+) -> Result<Vec<u8>, CapturePipelineError> {
+    let data_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| CapturePipelineError::DataDirectory)?;
+    if let Some(relative_path) = &record.thumbnail_path {
+        let thumbnail_path = resolve_capture_path(
+            &data_dir,
+            relative_path,
+            capture_id,
+            "webp",
+            &["thumbnails"],
+        )?;
+        match read_webp_container(&thumbnail_path) {
+            Ok(bytes) => return Ok(bytes),
+            Err(CapturePipelineError::ReadFailed) if !thumbnail_path.exists() => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    let original = read_saved_capture(app, capture_id, record)?;
+    thumbnail_from_webp(&original)
+}
+
+pub async fn delete_saved_capture(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    capture_id: Uuid,
+    record: &CaptureFileRecord,
+) -> Result<DeletedCapture, CapturePipelineError> {
+    let data_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| CapturePipelineError::DataDirectory)?;
+    let original_path = resolve_capture_path(
+        &data_dir,
+        &record.local_path,
+        capture_id,
+        "webp",
+        &["captures"],
+    )?;
+    let thumbnail_path = record
+        .thumbnail_path
+        .as_deref()
+        .map(|path| resolve_capture_path(&data_dir, path, capture_id, "webp", &["thumbnails"]))
+        .transpose()?;
+
+    let original = stage_file_for_deletion(&original_path, capture_id, true)
+        .await?
+        .ok_or(CapturePipelineError::DeleteFailed)?;
+    let mut staged = vec![original];
+    if let Some(path) = thumbnail_path.as_deref() {
+        match stage_file_for_deletion(path, capture_id, false).await {
+            Ok(Some(file)) => staged.push(file),
+            Ok(None) => {}
+            Err(error) => {
+                rollback_staged_files(&staged).await?;
+                return Err(error);
+            }
+        }
+    }
+
+    if let Err(error) = database::delete_capture(pool, capture_id).await {
+        rollback_staged_files(&staged).await?;
+        return Err(match error {
+            database::DatabaseError::CaptureInUse => CapturePipelineError::CaptureInUse,
+            database::DatabaseError::CaptureNotFound => CapturePipelineError::CaptureNotFound,
+            _ => CapturePipelineError::Database,
+        });
+    }
+
+    let storage_size = staged.iter().map(|file| file.size).sum();
+    remove_staged_files(&staged).await?;
+    let record_absent = database::capture_file(pool, capture_id)
+        .await
+        .map_err(|_| CapturePipelineError::DeleteIncomplete)?
+        .is_none();
+    let files_absent = staged
+        .iter()
+        .all(|file| !file.original_path.exists() && !file.staged_path.exists());
+    if !record_absent || !files_absent {
+        return Err(CapturePipelineError::DeleteIncomplete);
+    }
+
+    Ok(DeletedCapture {
+        storage_size,
+        captured_at_utc: record.captured_at_utc,
+    })
+}
+
+async fn stage_file_for_deletion(
+    path: &Path,
+    capture_id: Uuid,
+    required: bool,
+) -> Result<Option<StagedDeletion>, CapturePipelineError> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => return Ok(None),
+        Err(_) => return Err(CapturePipelineError::DeleteFailed),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAXIMUM_CAPTURE_LENGTH
+    {
+        return Err(CapturePipelineError::InvalidContainer);
+    }
+    let parent = path
+        .parent()
+        .ok_or(CapturePipelineError::InvalidContainer)?;
+    let staged_path = parent.join(format!(".{capture_id}.deleting"));
+    if staged_path.exists() {
+        return Err(CapturePipelineError::DeleteFailed);
+    }
+    tokio::fs::rename(path, &staged_path)
+        .await
+        .map_err(|_| CapturePipelineError::DeleteFailed)?;
+    Ok(Some(StagedDeletion {
+        original_path: path.to_path_buf(),
+        staged_path,
+        size: metadata.len(),
+    }))
+}
+
+async fn remove_staged_files(staged: &[StagedDeletion]) -> Result<(), CapturePipelineError> {
+    let mut removal_failed = false;
+    for file in staged {
+        if let Err(error) = tokio::fs::remove_file(&file.staged_path).await {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                removal_failed = true;
+            }
+        }
+    }
+    if removal_failed {
+        Err(CapturePipelineError::DeleteIncomplete)
+    } else {
+        Ok(())
+    }
+}
+
+async fn rollback_staged_files(staged: &[StagedDeletion]) -> Result<(), CapturePipelineError> {
+    let mut rollback_failed = false;
+    for file in staged.iter().rev() {
+        if tokio::fs::rename(&file.staged_path, &file.original_path)
+            .await
+            .is_err()
+        {
+            rollback_failed = true;
+        }
+    }
+    if rollback_failed {
+        Err(CapturePipelineError::DeleteIncomplete)
+    } else {
+        Ok(())
+    }
+}
+
+fn resolve_capture_path(
+    data_dir: &Path,
+    relative_path: &str,
+    capture_id: Uuid,
+    expected_extension: &str,
+    allowed_prefixes: &[&str],
+) -> Result<PathBuf, CapturePipelineError> {
+    let relative = Path::new(relative_path);
+    let expected_filename = format!("{capture_id}.{expected_extension}");
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || !allowed_prefixes
+            .iter()
+            .any(|prefix| relative.starts_with(Path::new(prefix)))
+        || relative.file_name().and_then(|value| value.to_str()) != Some(expected_filename.as_str())
+    {
+        return Err(CapturePipelineError::InvalidContainer);
+    }
+    Ok(data_dir.join(relative))
+}
+
+fn read_validated_webp(path: &Path) -> Result<Vec<u8>, CapturePipelineError> {
+    let container = read_webp_container(path)?;
+    if image::load_from_memory_with_format(&container, image::ImageFormat::WebP).is_err() {
+        return Err(CapturePipelineError::InvalidContainer);
+    }
     Ok(container)
 }
 
-pub fn decrypt_saved_capture(
-    app: &AppHandle,
-    capture_id: Uuid,
-) -> Result<Vec<u8>, CapturePipelineError> {
-    let captures_dir = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|_| CapturePipelineError::DataDirectory)?
-        .join("vault")
-        .join("captures");
-    let path = captures_dir.join(format!("{capture_id}.ejourney"));
-    let metadata =
-        std::fs::symlink_metadata(&path).map_err(|_| CapturePipelineError::ReadFailed)?;
+fn read_webp_container(path: &Path) -> Result<Vec<u8>, CapturePipelineError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| CapturePipelineError::ReadFailed)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
-        || metadata.len() > MAXIMUM_CONTAINER_LENGTH
+        || metadata.len() > MAXIMUM_CAPTURE_LENGTH
     {
         return Err(CapturePipelineError::InvalidContainer);
     }
 
     let container = std::fs::read(path).map_err(|_| CapturePipelineError::ReadFailed)?;
-    let key = load_existing_key()?;
-    let plaintext = decrypt_container(&key, capture_id, &container)?;
-    if !matches!(
-        image::guess_format(&plaintext),
-        Ok(image::ImageFormat::WebP)
-    ) || image::load_from_memory_with_format(&plaintext, image::ImageFormat::WebP).is_err()
+    if container.len() as u64 > MAXIMUM_CAPTURE_LENGTH
+        || !matches!(
+            image::guess_format(&container),
+            Ok(image::ImageFormat::WebP)
+        )
     {
-        let mut plaintext = plaintext;
-        plaintext.zeroize();
         return Err(CapturePipelineError::InvalidContainer);
     }
-
-    Ok(plaintext)
+    Ok(container)
 }
 
-fn decrypt_container(
-    key: &EncryptionKey,
-    expected_capture_id: Uuid,
-    container: &[u8],
+fn read_integrity_checked_webp(
+    path: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
 ) -> Result<Vec<u8>, CapturePipelineError> {
-    if container.len() < MINIMUM_CONTAINER_LENGTH
-        || &container[..FILE_MAGIC.len()] != FILE_MAGIC
-        || container[FILE_MAGIC.len()] != FILE_VERSION
+    let container = read_webp_container(path)?;
+    if container.len() as u64 != expected_size
+        || hex::encode(Sha256::digest(&container)) != expected_sha256
     {
         return Err(CapturePipelineError::InvalidContainer);
     }
-
-    let key_version_start = FILE_MAGIC.len() + 1;
-    let key_version = u32::from_le_bytes(
-        container[key_version_start..key_version_start + 4]
-            .try_into()
-            .map_err(|_| CapturePipelineError::InvalidContainer)?,
-    );
-    if key_version != KEY_VERSION {
-        return Err(CapturePipelineError::InvalidContainer);
-    }
-
-    let capture_id_start = key_version_start + 4;
-    let stored_capture_id = Uuid::from_slice(&container[capture_id_start..capture_id_start + 16])
-        .map_err(|_| CapturePipelineError::InvalidContainer)?;
-    if stored_capture_id != expected_capture_id {
-        return Err(CapturePipelineError::InvalidContainer);
-    }
-
-    let mut nonce = [0_u8; NONCE_LENGTH];
-    nonce.copy_from_slice(&container[HEADER_LENGTH..HEADER_LENGTH + NONCE_LENGTH]);
-    let payload = crate::crypto::EncryptedPayload {
-        nonce,
-        ciphertext: container[HEADER_LENGTH + NONCE_LENGTH..].to_vec(),
-    };
-    CryptoService::decrypt(key, &payload, &container[..HEADER_LENGTH])
-        .map_err(|_| CapturePipelineError::AuthenticationFailed)
+    Ok(container)
 }
 
 pub fn capture_inventory(app: &AppHandle) -> Result<(u32, u64), CapturePipelineError> {
-    let captures_dir = app
+    let data_dir = app
         .path()
         .app_local_data_dir()
-        .map_err(|_| CapturePipelineError::DataDirectory)?
-        .join("vault")
-        .join("captures");
-    let entries = match std::fs::read_dir(captures_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
-        Err(_) => return Err(CapturePipelineError::WriteFailed),
-    };
+        .map_err(|_| CapturePipelineError::DataDirectory)?;
 
     let mut count = 0_u32;
     let mut bytes = 0_u64;
-    for entry in entries.flatten() {
-        let path: PathBuf = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("ejourney") {
-            continue;
-        }
-        if let Ok(metadata) = entry.metadata() {
+    for (directory, extension, maximum_depth, count_as_capture) in [
+        (data_dir.join("captures"), "webp", 3, true),
+        (data_dir.join("thumbnails"), "webp", 3, false),
+    ] {
+        for path in inventory_files(&directory, extension, maximum_depth)? {
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
             bytes = bytes.saturating_add(metadata.len());
+            if !count_as_capture {
+                continue;
+            }
+            let Some(_id) = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .and_then(|value| Uuid::parse_str(value).ok())
+            else {
+                continue;
+            };
             if metadata
                 .modified()
                 .ok()
@@ -220,16 +414,64 @@ pub fn capture_inventory(app: &AppHandle) -> Result<(u32, u64), CapturePipelineE
     Ok((count, bytes))
 }
 
-fn encode_webp(captured: CapturedImage, max_width: u32) -> Result<Vec<u8>, CapturePipelineError> {
+fn inventory_files(
+    directory: &Path,
+    extension: &str,
+    maximum_depth: usize,
+) -> Result<Vec<PathBuf>, CapturePipelineError> {
+    let mut paths = Vec::new();
+    inventory_directory(directory, extension, maximum_depth, 0, &mut paths)?;
+    Ok(paths)
+}
+
+fn inventory_directory(
+    directory: &Path,
+    extension: &str,
+    maximum_depth: usize,
+    current_depth: usize,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), CapturePipelineError> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(CapturePipelineError::ReadFailed),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            if current_depth < maximum_depth {
+                inventory_directory(&path, extension, maximum_depth, current_depth + 1, paths)?;
+            }
+        } else if metadata.is_file()
+            && path.extension().and_then(|value| value.to_str()) == Some(extension)
+        {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn encode_webp_variants(
+    captured: CapturedImage,
+) -> Result<(Vec<u8>, Vec<u8>), CapturePipelineError> {
     let image =
         ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(captured.width, captured.height, captured.rgba)
             .ok_or(CapturePipelineError::InvalidPixels)?;
-    let mut image = DynamicImage::ImageRgba8(image);
-    if image.width() > max_width {
-        let height = ((image.height() as u64 * max_width as u64) / image.width() as u64) as u32;
-        image = image.resize_exact(max_width, height.max(1), FilterType::Lanczos3);
-    }
+    let original = DynamicImage::ImageRgba8(image);
+    let thumbnail = resize_to_max_width(original.clone(), THUMBNAIL_MAX_WIDTH);
+    Ok((
+        encode_dynamic_webp(&original)?,
+        encode_dynamic_webp(&thumbnail)?,
+    ))
+}
 
+fn encode_dynamic_webp(image: &DynamicImage) -> Result<Vec<u8>, CapturePipelineError> {
     let rgba = image.to_rgba8();
     let mut encoded = Vec::new();
     image::codecs::webp::WebPEncoder::new_lossless(&mut encoded)
@@ -243,50 +485,37 @@ fn encode_webp(captured: CapturedImage, max_width: u32) -> Result<Vec<u8>, Captu
     Ok(encoded)
 }
 
-#[cfg(target_os = "macos")]
-fn load_or_create_key() -> Result<EncryptionKey, CapturePipelineError> {
-    match get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
-        Ok(value) => {
-            let bytes: [u8; 32] = value
-                .try_into()
-                .map_err(|_| CapturePipelineError::KeyUnavailable)?;
-            Ok(EncryptionKey::from_bytes(bytes))
-        }
-        Err(_) => {
-            let mut bytes = [0_u8; 32];
-            OsRng.fill_bytes(&mut bytes);
-            set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, &bytes)
-                .map_err(|_| CapturePipelineError::KeyUnavailable)?;
-            Ok(EncryptionKey::from_bytes(bytes))
-        }
+fn resize_to_max_width(image: DynamicImage, max_width: u32) -> DynamicImage {
+    if image.width() <= max_width {
+        return image;
     }
+    let height = ((image.height() as u64 * max_width as u64) / image.width() as u64) as u32;
+    image.resize_exact(max_width, height.max(1), FilterType::Lanczos3)
 }
 
-#[cfg(target_os = "macos")]
-fn load_existing_key() -> Result<EncryptionKey, CapturePipelineError> {
-    let value = get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        .map_err(|_| CapturePipelineError::KeyUnavailable)?;
-    let bytes: [u8; 32] = value
-        .try_into()
-        .map_err(|_| CapturePipelineError::KeyUnavailable)?;
-    Ok(EncryptionKey::from_bytes(bytes))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn load_or_create_key() -> Result<EncryptionKey, CapturePipelineError> {
-    // Windows capture remains disabled until its DPAPI-backed key storage and
-    // Windows.Graphics.Capture adapter are implemented together.
-    Err(CapturePipelineError::KeyUnavailable)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn load_existing_key() -> Result<EncryptionKey, CapturePipelineError> {
-    Err(CapturePipelineError::KeyUnavailable)
+fn thumbnail_from_webp(encoded: &[u8]) -> Result<Vec<u8>, CapturePipelineError> {
+    let image = image::load_from_memory_with_format(encoded, image::ImageFormat::WebP)
+        .map_err(|_| CapturePipelineError::InvalidContainer)?;
+    encode_dynamic_webp(&resize_to_max_width(image, THUMBNAIL_MAX_WIDTH))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn solid_capture(width: u32, height: u32) -> CapturedImage {
+        CapturedImage {
+            width,
+            height,
+            rgba: vec![255; width as usize * height as usize * 4],
+        }
+    }
+
+    fn temporary_test_directory() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("electronic-journey-{}", Uuid::new_v4()));
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
 
     #[test]
     fn encoding_rejects_an_invalid_pixel_buffer() {
@@ -297,61 +526,157 @@ mod tests {
         };
 
         assert!(matches!(
-            encode_webp(captured, 2560),
+            encode_webp_variants(captured),
             Err(CapturePipelineError::InvalidPixels)
         ));
     }
 
     #[test]
-    fn encoding_respects_the_maximum_width() {
+    fn encoding_preserves_the_original_dimensions() {
         let captured = CapturedImage {
             width: 4,
             height: 2,
             rgba: vec![255; 4 * 2 * 4],
         };
-        let encoded = encode_webp(captured, 2).unwrap();
+        let (encoded, thumbnail) = encode_webp_variants(captured).unwrap();
         let decoded =
             image::load_from_memory_with_format(&encoded, image::ImageFormat::WebP).unwrap();
+        let decoded_thumbnail =
+            image::load_from_memory_with_format(&thumbnail, image::ImageFormat::WebP).unwrap();
 
-        assert_eq!(decoded.width(), 2);
-        assert_eq!(decoded.height(), 1);
+        assert_eq!(decoded.width(), 4);
+        assert_eq!(decoded.height(), 2);
+        assert_eq!(decoded_thumbnail.width(), 4);
+        assert_eq!(decoded_thumbnail.height(), 2);
     }
 
     #[test]
-    fn container_header_is_authenticated() {
-        let key = EncryptionKey::generate();
-        let capture_id = Uuid::new_v4();
-        let mut container = encrypt_container(&key, capture_id, b"encoded image").unwrap();
+    fn encoding_creates_a_bounded_thumbnail() {
+        let captured = solid_capture(2880, 1620);
+        let (encoded, thumbnail) = encode_webp_variants(captured).unwrap();
+        let decoded =
+            image::load_from_memory_with_format(&encoded, image::ImageFormat::WebP).unwrap();
+        let decoded_thumbnail =
+            image::load_from_memory_with_format(&thumbnail, image::ImageFormat::WebP).unwrap();
 
+        assert_eq!((decoded.width(), decoded.height()), (2880, 1620));
         assert_eq!(
-            decrypt_container(&key, capture_id, &container).unwrap(),
-            b"encoded image"
+            (decoded_thumbnail.width(), decoded_thumbnail.height()),
+            (THUMBNAIL_MAX_WIDTH, 810)
         );
-        container[8] ^= 1;
-        assert!(decrypt_container(&key, capture_id, &container).is_err());
     }
 
     #[test]
-    fn container_cannot_be_opened_under_another_capture_id() {
-        let key = EncryptionKey::generate();
-        let capture_id = Uuid::new_v4();
-        let container = encrypt_container(&key, capture_id, b"encoded image").unwrap();
+    fn validated_webp_accepts_only_decodable_webp_files() {
+        let directory = temporary_test_directory();
+        let valid_path = directory.join("valid.webp");
+        let invalid_path = directory.join("invalid.webp");
+        let (encoded, _) = encode_webp_variants(solid_capture(4, 2)).unwrap();
+        std::fs::write(&valid_path, &encoded).unwrap();
+        std::fs::write(&invalid_path, b"not an image").unwrap();
 
+        assert_eq!(read_validated_webp(&valid_path).unwrap(), encoded);
         assert!(matches!(
-            decrypt_container(&key, Uuid::new_v4(), &container),
+            read_validated_webp(&invalid_path),
             Err(CapturePipelineError::InvalidContainer)
         ));
+        assert_eq!(
+            read_integrity_checked_webp(
+                &valid_path,
+                encoded.len() as u64,
+                &hex::encode(Sha256::digest(&encoded)),
+            )
+            .unwrap(),
+            encoded
+        );
+        assert!(matches!(
+            read_integrity_checked_webp(&valid_path, 1, "invalid"),
+            Err(CapturePipelineError::InvalidContainer)
+        ));
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn truncated_container_returns_no_plaintext() {
-        let key = EncryptionKey::generate();
+    fn capture_paths_are_limited_to_the_expected_managed_directory() {
+        let id = Uuid::new_v4();
+        let relative = format!("captures/2026/07/29/{id}.webp");
+        assert!(
+            resolve_capture_path(Path::new("data"), &relative, id, "webp", &["captures"],).is_ok()
+        );
+        assert!(resolve_capture_path(
+            Path::new("data"),
+            &format!("exports/{id}.webp"),
+            id,
+            "webp",
+            &["captures"],
+        )
+        .is_err());
+        assert!(resolve_capture_path(
+            Path::new("data"),
+            &format!("captures/../{id}.webp"),
+            id,
+            "webp",
+            &["captures"],
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn staged_deletion_can_be_rolled_back_before_database_commit() {
+        let directory = temporary_test_directory();
         let capture_id = Uuid::new_v4();
-        let container = encrypt_container(&key, capture_id, b"encoded image").unwrap();
+        let original_path = directory.join(format!("{capture_id}.webp"));
+        std::fs::write(&original_path, b"test image bytes").unwrap();
+
+        let staged = stage_file_for_deletion(&original_path, capture_id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!original_path.exists());
+        assert!(staged.staged_path.exists());
+        rollback_staged_files(&[staged]).await.unwrap();
+        assert!(original_path.exists());
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn committed_deletion_removes_every_staged_file() {
+        let directory = temporary_test_directory();
+        let capture_id = Uuid::new_v4();
+        let original_path = directory.join(format!("{capture_id}.webp"));
+        std::fs::write(&original_path, b"test image bytes").unwrap();
+
+        let staged = stage_file_for_deletion(&original_path, capture_id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        let staged_path = staged.staged_path.clone();
+        remove_staged_files(&[staged]).await.unwrap();
+        assert!(!original_path.exists());
+        assert!(!staged_path.exists());
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validated_webp_rejects_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let directory = temporary_test_directory();
+        let target_path = directory.join("target.webp");
+        let link_path = directory.join("link.webp");
+        let (encoded, _) = encode_webp_variants(solid_capture(4, 2)).unwrap();
+        std::fs::write(&target_path, encoded).unwrap();
+        symlink(&target_path, &link_path).unwrap();
 
         assert!(matches!(
-            decrypt_container(&key, capture_id, &container[..HEADER_LENGTH]),
+            read_validated_webp(&link_path),
             Err(CapturePipelineError::InvalidContainer)
         ));
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

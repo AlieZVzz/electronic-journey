@@ -20,7 +20,7 @@ export function PrivacyPage({
   return (
     <section className="placeholder-page">
       <h1>隐私中心</h1>
-      <p>控制记录频率、空闲策略与图片处理默认值。</p>
+      <p>控制记录频率与空闲策略；原图始终按捕获分辨率无损保存。</p>
 
       <div className="settings-panel">
         <label>
@@ -55,22 +55,6 @@ export function PrivacyPage({
             }
             type="number"
             value={draft.idlePauseMinutes}
-          />
-        </label>
-
-        <label>
-          <span>WebP 质量</span>
-          <input
-            max={100}
-            min={1}
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                webpQuality: Number(event.target.value),
-              })
-            }
-            type="number"
-            value={draft.webpQuality}
           />
         </label>
 

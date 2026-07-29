@@ -1,45 +1,45 @@
-# 云端 API
+# LLM 提供商调用边界
 
-当前服务只实现 `GET /health` 和 `GET /v1/status`。以下接口是 Phase 2 契约，落地前需要认证、授权、限流、幂等和对象回查测试。
+当前产品不建设图片云端 API、对象存储或服务端 LLM 中转。所有图片分析请求由桌面客户端的 Rust 核心直接调用用户配置的 LLM 提供商。
 
-## 设备
+## 客户端内部命令
 
-```http
-POST /v1/devices
-POST /v1/devices/{device_id}/revoke
+Tauri 命令只接受明确类型；LLM 命令仍属于后续能力：
+
+```text
+delete_timeline_capture(capture_id)
+validate_llm_credential(provider)
+create_ai_job(capture_ids, question, provider, model, confirmation)
+cancel_ai_job(job_id)
+get_ai_job(job_id)
 ```
 
-设备撤销后不能再申请新的上传或下载地址。
+- `capture_id` 只接受 UUID，不接受前端提供的路径。删除操作必须验证受控路径、
+  SQLite 记录和文件均已移除后才返回成功；仍关联 AI 任务时拒绝删除。
+- `capture_ids` 必须是有界 UUID 列表，不接受路径或 URL。
+- `provider` 和 `model` 必须来自应用支持的枚举或审核后的目录。
+- `confirmation` 必须绑定本次图片集合、提供商、模型和目标域名，不能复用于另一请求。
+- React 不得获得 API Key、Authorization header 或任意 endpoint。
 
-## 上传
+## 提供商适配器
 
-```http
-POST /v1/uploads/init
-POST /v1/uploads/{upload_id}/complete
-```
+每个适配器负责：
 
-初始化请求只提交捕获 ID、密文大小、SHA-256、UTC 时间和加密元数据。返回的预签名地址必须：
+- 固定允许的 HTTPS 域名和端口。
+- 凭据格式与最小验证请求。
+- 图片数、单图大小、总字节数和 MIME 类型限制。
+- 请求和响应的提供商格式映射。
+- 连接、读取和总请求超时。
+- 跨源重定向限制。
+- 稳定且脱敏的错误码。
 
-- 只允许一个随机对象键和一个 HTTP 方法。
-- 短时有效并限制内容大小。
-- 不具备列目录、读取其他对象或删除对象的权限。
-- 不进入日志、分析事件或错误报告。
+## 成功语义
 
-完成接口必须从对象存储回查对象存在性、大小和摘要。回查成功前客户端不得将任务标记为 `completed`。
+- 凭据验证成功只表示当次最小请求通过，不表示图片请求一定成功。
+- AI 任务只有在完整响应接收并解析后才能标记为 `completed`。
+- 取消或超时不能被表述为提供商已经删除请求数据。
+- 默认不自动重试包含图片的请求；用户手动重试前提示可能重复发送和计费。
 
-## 时间线和删除
+## 日志禁令
 
-```http
-GET    /v1/captures?cursor=<cursor>&limit=50
-DELETE /v1/captures/{capture_id}
-```
-
-时间线使用不透明游标。删除必须幂等；异步删除返回可查询状态，不得将数据库记录删除误报为对象也已删除。
-
-## 通用要求
-
-- 所有接口仅允许 HTTPS。
-- 使用短期访问令牌和可撤销刷新令牌。
-- 用户、设备和对象均执行资源级授权。
-- 错误响应使用稳定脱敏错误码，不返回内部路径、对象 URL 或凭据。
-- 上传初始化以用户 ID 和截图 ID 作为幂等键。
+不得记录图片、base64 请求体、API Key、令牌、Authorization header、用户问题全文、完整模型回答或提供商返回的敏感原始错误。

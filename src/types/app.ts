@@ -10,8 +10,6 @@ export type PermissionState = "not_determined" | "granted" | "denied";
 export interface CaptureSettings {
   intervalMinutes: number;
   idlePauseMinutes: number;
-  webpQuality: number;
-  maxWidth: number;
   skipDuplicates: boolean;
 }
 
@@ -20,8 +18,7 @@ export interface AppSnapshot {
   nextCaptureAt: string | null;
   todayCount: number;
   localStorageBytes: number;
-  pendingUploads: number;
-  cloudEnabled: boolean;
+  pendingAiJobs: number;
   permissionGranted: boolean;
   permissionState: PermissionState;
   lastError: string | null;
@@ -31,7 +28,7 @@ export interface AppSnapshot {
 export interface TimelineCapture {
   id: string;
   capturedAtUtc: string;
-  cipherSize: number;
+  fileSize: number;
 }
 
 export interface TimelinePageResult {

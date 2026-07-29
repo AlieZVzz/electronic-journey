@@ -1,13 +1,14 @@
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex,
     },
     time::Duration as StdDuration,
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager, State};
 #[cfg(target_os = "macos")]
 use zeroize::Zeroize;
@@ -36,8 +37,6 @@ pub enum RecordingState {
 pub struct CaptureSettings {
     pub interval_minutes: u16,
     pub idle_pause_minutes: u16,
-    pub webp_quality: u8,
-    pub max_width: u32,
     pub skip_duplicates: bool,
 }
 
@@ -46,8 +45,6 @@ impl Default for CaptureSettings {
         Self {
             interval_minutes: 5,
             idle_pause_minutes: 10,
-            webp_quality: 85,
-            max_width: 2560,
             skip_duplicates: true,
         }
     }
@@ -67,17 +64,6 @@ impl CaptureSettings {
                 "idle pause must be between 0 and 240 minutes".into(),
             ));
         }
-        if !(1..=100).contains(&self.webp_quality) {
-            return Err(AppError::InvalidSettings(
-                "WebP quality must be between 1 and 100".into(),
-            ));
-        }
-        if !(640..=7680).contains(&self.max_width) {
-            return Err(AppError::InvalidSettings(
-                "maximum width must be between 640 and 7680".into(),
-            ));
-        }
-
         Ok(())
     }
 }
@@ -89,8 +75,7 @@ pub struct AppSnapshot {
     next_capture_at: Option<String>,
     today_count: u32,
     local_storage_bytes: u64,
-    pending_uploads: u32,
-    cloud_enabled: bool,
+    pending_ai_jobs: u32,
     permission_granted: bool,
     permission_state: PermissionState,
     last_error: Option<String>,
@@ -104,8 +89,7 @@ impl Default for AppSnapshot {
             next_capture_at: None,
             today_count: 0,
             local_storage_bytes: 0,
-            pending_uploads: 0,
-            cloud_enabled: false,
+            pending_ai_jobs: 0,
             permission_granted: false,
             permission_state: PermissionState::NotDetermined,
             last_error: None,
@@ -118,9 +102,11 @@ impl Default for AppSnapshot {
 pub struct RuntimeState {
     snapshot: Mutex<AppSnapshot>,
     schedule_generation: AtomicU64,
+    startup_recovery_started: AtomicBool,
 }
 
 impl RuntimeState {
+    #[cfg(test)]
     pub fn from_permission_result(
         permission_result: Result<PermissionState, CaptureError>,
     ) -> Self {
@@ -138,6 +124,7 @@ impl RuntimeState {
         Self {
             snapshot: Mutex::new(snapshot),
             schedule_generation: AtomicU64::new(0),
+            startup_recovery_started: AtomicBool::new(false),
         }
     }
 
@@ -234,6 +221,29 @@ impl RuntimeState {
         }
     }
 
+    pub fn set_startup_recovery_error(&self) {
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            snapshot.last_error =
+                Some("本地数据恢复未能完成；现有索引仍可使用，请重新启动应用后重试。".into());
+        }
+    }
+
+    pub fn begin_startup_recovery(&self) -> bool {
+        self.startup_recovery_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn capture_deleted(&self, captured_at_utc: DateTime<Utc>, storage_size: u64) {
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            if captured_at_utc.with_timezone(&Local).date_naive() == Local::now().date_naive() {
+                snapshot.today_count = snapshot.today_count.saturating_sub(1);
+            }
+            snapshot.local_storage_bytes =
+                snapshot.local_storage_bytes.saturating_sub(storage_size);
+        }
+    }
+
     fn schedule_is_active(&self, generation: u64) -> bool {
         self.schedule_generation.load(Ordering::SeqCst) == generation
             && self
@@ -243,7 +253,7 @@ impl RuntimeState {
                 .unwrap_or(false)
     }
 
-    fn capture_succeeded(&self, generation: u64, cipher_size: u64) -> Option<StdDuration> {
+    fn capture_succeeded(&self, generation: u64, storage_size: u64) -> Option<StdDuration> {
         if self.schedule_generation.load(Ordering::SeqCst) != generation {
             return None;
         }
@@ -252,7 +262,7 @@ impl RuntimeState {
             return None;
         }
         snapshot.today_count = snapshot.today_count.saturating_add(1);
-        snapshot.local_storage_bytes = snapshot.local_storage_bytes.saturating_add(cipher_size);
+        snapshot.local_storage_bytes = snapshot.local_storage_bytes.saturating_add(storage_size);
         snapshot.last_error = None;
         let delay = StdDuration::from_secs(u64::from(snapshot.settings.interval_minutes) * 60);
         snapshot.next_capture_at = Some(next_capture_at(Utc::now(), delay).to_rfc3339());
@@ -294,12 +304,12 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
                     .or_else(|| displays.first())
                     .ok_or_else(|| CaptureError::DisplayUnavailable("primary".into()))?;
                 let captured = PlatformCapture.capture(&display.id).await?;
-                Ok::<_, CaptureError>(captured)
+                Ok::<_, CaptureError>((captured, display.id.0.clone()))
             }
             .await;
 
-            let captured = match capture_result {
-                Ok(captured) => captured,
+            let (captured, display_id) = match capture_result {
+                Ok(result) => result,
                 Err(CaptureError::PermissionDenied) => {
                     runtime.capture_failed(
                         generation,
@@ -321,14 +331,22 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
             if !runtime.schedule_is_active(generation) {
                 return;
             }
-            let settings = match runtime.snapshot() {
-                Ok(snapshot) => snapshot.settings,
-                Err(_) => return,
-            };
-            match capture_pipeline::persist_capture(&app, captured, &settings).await {
+            let pool = app.state::<SqlitePool>();
+            let captured_at_utc = Utc::now();
+            let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "Etc/Unknown".into());
+            match capture_pipeline::persist_capture(
+                &app,
+                pool.inner(),
+                captured,
+                &display_id,
+                captured_at_utc,
+                &timezone,
+            )
+            .await
+            {
                 Ok(stored) => {
                     let Some(next_delay) =
-                        runtime.capture_succeeded(generation, stored.cipher_size)
+                        runtime.capture_succeeded(generation, stored.storage_size)
                     else {
                         return;
                     };
@@ -337,7 +355,7 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
                 Err(_) => {
                     runtime.capture_failed(
                         generation,
-                        "截图未能加密写入本地保险箱，记录已停止。".into(),
+                        "截图未能写入本地存储，记录已停止。".into(),
                         false,
                     );
                     return;
@@ -348,11 +366,22 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
 }
 
 #[tauri::command]
-pub async fn get_app_snapshot(state: State<'_, RuntimeState>) -> Result<AppSnapshot, String> {
+pub fn get_app_snapshot(state: State<'_, RuntimeState>) -> Result<AppSnapshot, String> {
+    crate::trace_startup("cached snapshot requested");
+    state.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn refresh_screen_capture_permission(
+    state: State<'_, RuntimeState>,
+) -> Result<AppSnapshot, String> {
+    crate::trace_startup("permission refresh started");
     let permission_result = PlatformCapture.permission_state().await;
-    state
+    let snapshot = state
         .update_permission(permission_result)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    crate::trace_startup("permission refresh finished");
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -422,25 +451,87 @@ pub async fn request_screen_capture_permission(
 }
 
 #[tauri::command]
-pub fn list_timeline_captures(
-    app: AppHandle,
+pub async fn list_timeline_captures(
+    pool: State<'_, SqlitePool>,
     offset: u32,
     limit: Option<u16>,
 ) -> Result<timeline::TimelinePage, String> {
-    timeline::list_captures(&app, offset, limit)
+    timeline::list_captures(pool.inner(), offset, limit)
+        .await
         .map_err(|_| "无法读取本地时间线，请稍后重试。".to_string())
 }
 
 #[tauri::command]
-pub fn read_timeline_capture(
+pub async fn read_timeline_capture(
     app: AppHandle,
+    pool: State<'_, SqlitePool>,
     capture_id: String,
 ) -> Result<tauri::ipc::Response, String> {
     let capture_id =
         uuid::Uuid::parse_str(&capture_id).map_err(|_| "截图标识无效。".to_string())?;
-    capture_pipeline::decrypt_saved_capture(&app, capture_id)
-        .map(tauri::ipc::Response::new)
-        .map_err(|_| "无法解密这张截图；文件可能已损坏或密钥不可用。".to_string())
+    let record = crate::database::capture_file(pool.inner(), capture_id)
+        .await
+        .map_err(|_| "无法读取截图索引。".to_string())?
+        .ok_or_else(|| "截图不存在。".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        capture_pipeline::read_saved_capture(&app, capture_id, &record)
+    })
+    .await
+    .map_err(|_| "读取截图的后台任务意外结束。".to_string())?
+    .map(tauri::ipc::Response::new)
+    .map_err(|_| "无法读取这张截图；文件可能已损坏。".to_string())
+}
+
+#[tauri::command]
+pub async fn read_timeline_thumbnail(
+    app: AppHandle,
+    pool: State<'_, SqlitePool>,
+    capture_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    let capture_id =
+        uuid::Uuid::parse_str(&capture_id).map_err(|_| "截图标识无效。".to_string())?;
+    let record = crate::database::capture_file(pool.inner(), capture_id)
+        .await
+        .map_err(|_| "无法读取截图索引。".to_string())?
+        .ok_or_else(|| "截图不存在。".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        capture_pipeline::read_saved_thumbnail(&app, capture_id, &record)
+    })
+    .await
+    .map_err(|_| "读取缩略图的后台任务意外结束。".to_string())?
+    .map(tauri::ipc::Response::new)
+    .map_err(|_| "无法读取这张截图的缩略图。".to_string())
+}
+
+#[tauri::command]
+pub async fn delete_timeline_capture(
+    app: AppHandle,
+    pool: State<'_, SqlitePool>,
+    runtime: State<'_, RuntimeState>,
+    capture_id: String,
+) -> Result<(), String> {
+    let capture_id =
+        uuid::Uuid::parse_str(&capture_id).map_err(|_| "截图标识无效。".to_string())?;
+    let record = crate::database::capture_file(pool.inner(), capture_id)
+        .await
+        .map_err(|_| "无法读取截图索引。".to_string())?
+        .ok_or_else(|| "截图不存在或已经被删除。".to_string())?;
+    match capture_pipeline::delete_saved_capture(&app, pool.inner(), capture_id, &record).await {
+        Ok(deleted) => {
+            runtime.capture_deleted(deleted.captured_at_utc, deleted.storage_size);
+            Ok(())
+        }
+        Err(capture_pipeline::CapturePipelineError::CaptureInUse) => {
+            Err("这张截图仍关联 AI 任务，暂时不能删除。".to_string())
+        }
+        Err(capture_pipeline::CapturePipelineError::CaptureNotFound) => {
+            Err("截图不存在或已经被删除。".to_string())
+        }
+        Err(capture_pipeline::CapturePipelineError::DeleteIncomplete) => {
+            Err("删除记录已提交，但文件清理未能完整验证；请检查本地数据目录。".to_string())
+        }
+        Err(_) => Err("无法删除这张截图，本地文件和索引未确认全部移除。".to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -452,8 +543,6 @@ mod tests {
         let settings = CaptureSettings::default();
         assert_eq!(settings.interval_minutes, 5);
         assert_eq!(settings.idle_pause_minutes, 10);
-        assert_eq!(settings.webp_quality, 85);
-        assert_eq!(settings.max_width, 2560);
         assert!(settings.skip_duplicates);
         assert!(settings.validate().is_ok());
     }
@@ -520,6 +609,14 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_can_only_begin_once() {
+        let runtime = RuntimeState::default();
+
+        assert!(runtime.begin_startup_recovery());
+        assert!(!runtime.begin_startup_recovery());
+    }
+
+    #[test]
     fn revoked_permission_stops_an_active_schedule() {
         let runtime = RuntimeState::from_permission_result(Ok(PermissionState::Granted));
         let (_, generation, _) = runtime.set_state(RecordingState::Running).unwrap();
@@ -532,5 +629,21 @@ mod tests {
         assert!(!snapshot.permission_granted);
         assert!(snapshot.next_capture_at.is_none());
         assert!(!runtime.schedule_is_active(generation));
+    }
+
+    #[test]
+    fn deleting_a_capture_updates_local_inventory_without_underflow() {
+        let runtime = RuntimeState::from_permission_result(Ok(PermissionState::Granted));
+        runtime.set_inventory(2, 600);
+
+        runtime.capture_deleted(Utc::now(), 250);
+        let snapshot = runtime.snapshot().unwrap();
+        assert_eq!(snapshot.today_count, 1);
+        assert_eq!(snapshot.local_storage_bytes, 350);
+
+        runtime.capture_deleted(Utc::now(), 1_000);
+        let snapshot = runtime.snapshot().unwrap();
+        assert_eq!(snapshot.today_count, 0);
+        assert_eq!(snapshot.local_storage_bytes, 0);
     }
 }

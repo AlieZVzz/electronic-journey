@@ -51,8 +51,8 @@ export function FirstRunOnboarding({
             <p className="eyebrow">WELCOME · PRIVACY FIRST</p>
             <h1 id="onboarding-title">开始你的私人数字旅程</h1>
             <p className="onboarding-lead">
-              Electronic Journey 只在你主动开启时记录屏幕。截图留在本机处理，
-              离开本机前必须经过认证加密。
+              Electronic Journey 只在你主动开启时记录屏幕。截图默认只保存在本机，
+              不会自动上传或发送给第三方。
             </p>
 
             <ul className="onboarding-promises">
@@ -74,7 +74,7 @@ export function FirstRunOnboarding({
                 <span>03</span>
                 <div>
                   <strong>当前采用安全默认值</strong>
-                  <p>首次记录会在开启 10 秒后执行；云同步与恢复密钥尚未启用。</p>
+                  <p>首次记录会在开启 10 秒后执行；AI 分析必须由你选择图片并确认。</p>
                 </div>
               </li>
             </ul>

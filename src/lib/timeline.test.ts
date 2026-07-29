@@ -8,12 +8,12 @@ describe("timeline grouping", () => {
       {
         id: "one",
         capturedAtUtc: "2026-07-28T15:30:00Z",
-        cipherSize: 10,
+        fileSize: 10,
       },
       {
         id: "two",
         capturedAtUtc: "2026-07-28T16:30:00Z",
-        cipherSize: 20,
+        fileSize: 20,
       },
     ];
 
@@ -26,12 +26,12 @@ describe("timeline grouping", () => {
       {
         id: "newer",
         capturedAtUtc: "2026-07-28T12:00:00Z",
-        cipherSize: 10,
+        fileSize: 10,
       },
       {
         id: "older",
         capturedAtUtc: "2026-07-28T10:00:00Z",
-        cipherSize: 20,
+        fileSize: 20,
       },
     ];
 

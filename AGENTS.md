@@ -2,24 +2,27 @@
 
 ## Project purpose
 
-Electronic Journey is a privacy-first Windows and macOS desktop application
+Electronic Journey is a local-first Windows and macOS desktop application
 for recording a user's own digital journey. Captures must be visible,
-consensual, locally encrypted before upload, and recoverable after interruption.
+consensual, stored locally, and recoverable after interruption. Images leave
+the device only when the user explicitly selects them and confirms a request
+from the Rust client to a configured LLM provider.
 
 Core goals:
 
 - Build one desktop product with Tauri 2, React, TypeScript, Vite, and Rust.
 - Keep screenshot, key, filesystem, database, and network access behind narrow
   Rust interfaces and Tauri commands.
-- Ensure the service and object store only receive authenticated ciphertext.
+- Do not build or use a first-party image cloud, object store, or LLM proxy.
+- Keep LLM credentials and image network access behind narrow Rust interfaces.
 
 ## Technology
 
 - Desktop: Tauri 2 with Rust.
 - UI: React 19, TypeScript, and Vite 6.
 - Local data: SQLite through `sqlx`.
-- Crypto: XChaCha20-Poly1305 envelope-encryption building blocks.
-- API: Rust Axum; future metadata store is PostgreSQL.
+- Local images: lossless WebP originals and bounded WebP thumbnails.
+- LLM integration: Rust provider adapters with BYOK or per-user OAuth tokens.
 - Package manager: npm.
 
 ## Commands
@@ -40,10 +43,11 @@ Rust and platform development prerequisites are listed in `README.md`.
   behavior.
 - Prefer small scoped changes and preserve public interfaces unless the task
   explicitly changes them.
-- Treat authentication, encryption, permissions, data deletion, migrations,
-  update signing, and recovery behavior as security-sensitive. Propose the
-  design and test strategy before changing them.
-- Do not claim a screenshot, upload, deletion, or recovery operation succeeded
+- Treat authentication, credentials, permissions, data
+  deletion, migrations, update signing, and LLM request behavior as
+  security-sensitive. Propose the design and test strategy before changing
+  them.
+- Do not claim a screenshot, LLM request, deletion, or recovery operation succeeded
   until its documented verification step has passed.
 - Add focused tests for new business logic and regression tests for bugs.
 - Run the smallest relevant checks, then `scripts/check.sh` when practical.
@@ -51,14 +55,14 @@ Rust and platform development prerequisites are listed in `README.md`.
 
 ## Security rules
 
-- Never read, log, print, or commit secrets, tokens, private keys, recovery
-  keys, authorization headers, presigned URLs, screenshots, or plaintext
-  thumbnail data.
+- Never read, log, print, or commit secrets, tokens, private keys,
+  authorization headers, screenshots, prompts, full model answers, or
+  plaintext thumbnail data.
 - Never add analytics, remote fonts, remote images, or new outbound requests
-  without an explicit product need and privacy review.
+  except an explicitly approved LLM provider request with privacy review.
 - Never allow the frontend arbitrary filesystem, shell, screenshot, or network
   access. Use minimal Tauri capabilities and validated commands.
-- Do not silently weaken TLS, AEAD authentication, key storage, update
+- Do not silently weaken TLS, key storage, update
   signatures, or deletion confirmation.
 - Do not execute deployment, publishing, remote push, destructive Git, or bulk
   deletion unless the user explicitly asks.

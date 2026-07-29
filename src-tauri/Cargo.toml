@@ -1,7 +1,7 @@
 [package]
 name = "electronic-journey-desktop"
 version.workspace = true
-description = "Electronic Journey privacy-first desktop client"
+description = "Electronic Journey local-first desktop client"
 authors.workspace = true
 edition.workspace = true
 publish = false
@@ -16,11 +16,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 async-trait.workspace = true
-chacha20poly1305 = "0.10"
 chrono.workspace = true
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["webp"] }
-rand = "0.8"
+iana-time-zone = "0.1"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
@@ -34,7 +33,6 @@ zeroize = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
-security-framework = "3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [

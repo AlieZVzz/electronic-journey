@@ -23,6 +23,7 @@
         "decorations": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
+        "backgroundColor": "#f7f7f8",
         "center": true
       }
     ],
@@ -35,7 +36,7 @@
     "active": true,
     "targets": "all",
     "category": "Productivity",
-    "shortDescription": "Your private digital journey archive",
-    "longDescription": "A privacy-first desktop application that captures, encrypts, and organizes your own digital journey."
+    "shortDescription": "Your local digital journey archive",
+    "longDescription": "A local-first desktop application that captures and organizes your own digital journey."
   }
 }

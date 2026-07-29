@@ -1,10 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import { desktopApi } from "../api/desktop";
 import { MetricCard } from "../components/MetricCard";
 import { ScreenCaptureDisclosure } from "../components/ScreenCaptureDisclosure";
 import { StatusPill } from "../components/StatusPill";
 import { canRequestScreenCapturePermission } from "../lib/screenCaptureDisclosure";
-import type { AppSnapshot, RecordingState } from "../types/app";
+import type {
+  AppSnapshot,
+  RecordingState,
+  TimelineCapture,
+} from "../types/app";
 
 interface TodayPageProps {
   snapshot: AppSnapshot;
@@ -43,6 +48,58 @@ export function TodayPage({
   const [showPermissionDisclosure, setShowPermissionDisclosure] =
     useState(false);
   const [permissionAcknowledged, setPermissionAcknowledged] = useState(false);
+  const [recentCapture, setRecentCapture] = useState<{
+    capture: TimelineCapture;
+    url: string;
+  } | null>(null);
+  const [recentLoading, setRecentLoading] = useState(true);
+  const [recentError, setRecentError] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+    setRecentCapture(null);
+    setRecentLoading(true);
+    setRecentError(false);
+
+    void desktopApi
+      .listTimelineCaptures(0, 1)
+      .then(async (page) => {
+        const capture = page.items[0];
+        if (!capture) {
+          if (active) {
+            setRecentCapture(null);
+          }
+          return;
+        }
+        const bytes = await desktopApi.readTimelineCapture(capture.id);
+        if (!active) {
+          return;
+        }
+        objectUrl = URL.createObjectURL(
+          new Blob([bytes], { type: "image/webp" }),
+        );
+        setRecentCapture({ capture, url: objectUrl });
+      })
+      .catch(() => {
+        if (active) {
+          setRecentCapture(null);
+          setRecentError(true);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setRecentLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [snapshot.todayCount]);
 
   function closePermissionDisclosure() {
     if (loading) {
@@ -134,15 +191,15 @@ export function TodayPage({
           value={`${snapshot.todayCount} 张`}
         />
         <MetricCard
-          detail="本地加密保险箱"
+          detail="原图与缩略图"
           label="占用空间"
           value={formatBytes(snapshot.localStorageBytes)}
         />
         <MetricCard
-          detail={snapshot.cloudEnabled ? "等待安全上传" : "仅本地模式"}
-          label="待上传"
+          detail="客户端直连功能待接入"
+          label="AI 任务"
           tone="amber"
-          value={`${snapshot.pendingUploads} 项`}
+          value={`${snapshot.pendingAiJobs} 项`}
         />
       </section>
 
@@ -152,13 +209,41 @@ export function TodayPage({
             <div>
               <h3>最近一张截图</h3>
             </div>
-            <span>{snapshot.todayCount ? "本机解密" : "暂无记录"}</span>
+            <span>{recentCapture ? "已保存到本机" : "暂无记录"}</span>
           </div>
-          <div className="empty-canvas">
-            <span aria-hidden="true">＋</span>
-            <strong>你的第一段旅程会出现在这里</strong>
-            <p>缩略图只在本机按需解密和生成。</p>
-          </div>
+          {recentCapture ? (
+            <figure className="recent-capture">
+              <img
+                alt={`${formatNextCapture(recentCapture.capture.capturedAtUtc)} 保存的最近截图`}
+                onError={() => {
+                  setRecentCapture(null);
+                  setRecentError(true);
+                }}
+                src={recentCapture.url}
+              />
+              <figcaption>
+                {formatNextCapture(recentCapture.capture.capturedAtUtc)}
+                {" · "}
+                {formatBytes(recentCapture.capture.fileSize)}
+              </figcaption>
+            </figure>
+          ) : (
+            <div className="empty-canvas">
+              <span aria-hidden="true">{recentLoading ? "…" : "＋"}</span>
+              <strong>
+                {recentLoading
+                  ? "正在读取最近截图"
+                  : recentError
+                    ? "最近截图暂时无法显示"
+                    : "你的第一段旅程会出现在这里"}
+              </strong>
+              <p>
+                {recentError
+                  ? "可以切换到时间线重试，或重新打开今日页面。"
+                  : "缩略图保存在本机，并会直接显示在时间线中。"}
+              </p>
+            </div>
+          )}
         </article>
 
         <article className="panel panel--compact">
@@ -201,8 +286,8 @@ export function TodayPage({
             <li className="is-ready">
               <span />
               <div>
-                <strong>本地加密</strong>
-                <p>XChaCha20-Poly1305</p>
+                <strong>本地存储</strong>
+                <p>普通 WebP · 不自动上传</p>
               </div>
             </li>
           </ul>

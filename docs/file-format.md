@@ -1,35 +1,31 @@
-# `.ejourney` 文件格式
+# 本地图片格式
 
-当前文件只定义容器契约；完整解析器和主密钥包装尚未实现。
+Electronic Journey 的本地截图只使用标准 WebP，不定义额外的应用容器格式。
 
-## 二进制布局
+## 原图
 
-```text
-magic                 4 bytes   "EJRN"
-format_version        2 bytes
-algorithm_id          2 bytes
-record_id            16 bytes
-key_version           4 bytes
-wrapped_key_length    4 bytes
-wrapped_data_key      variable
-nonce                24 bytes
-ciphertext            variable
-authentication_tag   16 bytes
-```
+- 路径：`captures/<year>/<month>/<day>/<capture-id>.webp`
+- 文件名必须是截图 UUID。
+- 使用无损 WebP，保留平台截图返回的像素尺寸。
+- SQLite 保存文件相对路径、字节数和 SHA-256。
+- 报告保存成功前必须完成原子写入、回读和解码验证。
 
-## 规则
+## 缩略图
 
-- 多字节整数编码方式必须在实现前固定，建议网络字节序。
-- `wrapped_key_length` 和总文件大小必须有严格上限。
-- 解析器在分配内存前验证所有长度和剩余字节数。
-- `magic`、格式版本、记录 ID 和密钥版本进入认证附加数据。
-- 未知算法、未知必需字段或不支持的版本必须明确失败。
-- 认证标签验证完成前不得输出任何明文。
-- 解析器不得跟随容器内容指定的路径或 URL。
+- 路径：`thumbnails/<year>/<month>/<day>/<capture-id>.webp`
+- 与原图使用相同截图 UUID。
+- 最大宽度为 1440 像素，保持原始宽高比。
+- 缩略图失败不得影响已验证原图的本地保存状态。
 
-## 版本策略
+## 读取规则
 
-- 向后兼容读取已发布版本。
-- 写入只使用当前版本。
-- 格式迁移先生成新文件、验证可读，再原子替换。
-- 不在原文件上原地修改密文。
+- 前端只提交截图 UUID，不提交路径或 URL。
+- Rust 从 SQLite 解析相对路径，并限制在受控目录中。
+- 拒绝绝对路径、目录逃逸、软链接、非普通文件、超大文件和未知格式。
+- 原图预览读取核对数据库记录的文件大小和 SHA-256。
+- WebView 解码失败必须显示为预览失败。
+
+## 格式边界
+
+- SQLite 当前不保存图片格式分支字段，原图和缩略图 MIME 类型固定为 `image/webp`。
+- 发送给 LLM 前如需满足提供商大小限制，只在内存中生成临时副本，不长期落盘。

@@ -2,7 +2,7 @@
   "name": "electronic-journey",
   "private": true,
   "version": "0.1.0",
-  "description": "Privacy-first, end-to-end encrypted desktop journey recorder.",
+  "description": "Local-first desktop journey recorder with user-initiated LLM analysis.",
   "type": "module",
   "packageManager": "npm@10.8.2",
   "engines": {

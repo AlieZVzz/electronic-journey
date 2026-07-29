@@ -19,8 +19,7 @@ const browserSnapshot: AppSnapshot = {
   nextCaptureAt: null,
   todayCount: 0,
   localStorageBytes: 0,
-  pendingUploads: 0,
-  cloudEnabled: false,
+  pendingAiJobs: 0,
   permissionGranted: false,
   permissionState: "not_determined",
   lastError: null,
@@ -31,9 +30,15 @@ function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+let permissionRefresh: Promise<AppSnapshot> | null = null;
+
 export const desktopApi = {
   isDesktopRuntime(): boolean {
     return isTauriRuntime();
+  },
+
+  initialSnapshot(): AppSnapshot {
+    return structuredClone(browserSnapshot);
   },
 
   async getSnapshot(): Promise<AppSnapshot> {
@@ -42,6 +47,24 @@ export const desktopApi = {
     }
 
     return invoke<AppSnapshot>("get_app_snapshot");
+  },
+
+  async refreshScreenCapturePermission(): Promise<AppSnapshot> {
+    if (!isTauriRuntime()) {
+      return structuredClone(browserSnapshot);
+    }
+    if (!permissionRefresh) {
+      permissionRefresh = (async () => {
+        try {
+          return await invoke<AppSnapshot>(
+            "refresh_screen_capture_permission",
+          );
+        } finally {
+          permissionRefresh = null;
+        }
+      })();
+    }
+    return permissionRefresh;
   },
 
   async setRecordingState(state: RecordingState): Promise<AppSnapshot> {
@@ -95,9 +118,25 @@ export const desktopApi = {
 
   async readTimelineCapture(captureId: string): Promise<ArrayBuffer> {
     if (!isTauriRuntime()) {
-      throw new Error("截图只能在桌面应用中解密查看。");
+      throw new Error("截图只能在桌面应用中查看。");
     }
 
     return invoke<ArrayBuffer>("read_timeline_capture", { captureId });
+  },
+
+  async readTimelineThumbnail(captureId: string): Promise<ArrayBuffer> {
+    if (!isTauriRuntime()) {
+      throw new Error("截图缩略图只能在桌面应用中查看。");
+    }
+
+    return invoke<ArrayBuffer>("read_timeline_thumbnail", { captureId });
+  },
+
+  async deleteTimelineCapture(captureId: string): Promise<void> {
+    if (!isTauriRuntime()) {
+      throw new Error("截图只能在桌面应用中删除。");
+    }
+
+    return invoke<void>("delete_timeline_capture", { captureId });
   },
 };

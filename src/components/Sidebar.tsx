@@ -37,7 +37,7 @@ const navigation: Array<{ id: PageId; label: string; icon: ReactNode }> = [
   },
   {
     id: "storage",
-    label: "存储与安全",
+    label: "存储与 AI",
     icon: (
       <svg viewBox="0 0 20 20">
         <ellipse cx="10" cy="5" rx="6" ry="2.5" />
@@ -79,8 +79,8 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps) {
           </svg>
         </span>
         <div>
-          <strong>本地保险箱</strong>
-          <p>已锁定 · 端到端加密</p>
+          <strong>本地资料库</strong>
+          <p>仅本机 · 不自动上传</p>
         </div>
       </div>
     </aside>

@@ -15,10 +15,8 @@ describe("capture settings", () => {
       validateCaptureSettings({
         intervalMinutes: 3,
         idlePauseMinutes: -1,
-        webpQuality: 101,
-        maxWidth: 320,
         skipDuplicates: false,
       }),
-    ).toHaveLength(4);
+    ).toHaveLength(2);
   });
 });

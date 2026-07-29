@@ -1,14 +1,14 @@
 export function StoragePage() {
   return (
     <section className="placeholder-page">
-      <h1>存储与安全</h1>
-      <p>管理本地保险箱、恢复密钥、云同步和已授权设备。</p>
+      <h1>存储与 AI</h1>
+      <p>管理本地图片、保留策略和未来的 LLM 提供商凭据。</p>
       <div className="notice-card">
         <span aria-hidden="true">◆</span>
         <div>
-          <strong>当前为仅本地模式</strong>
+          <strong>图片只保存在本机</strong>
           <p>
-            云同步将在第二阶段接入。初始化版本不会上传任何截图或敏感元数据。
+            当前不会自动上传任何截图。客户端直连 LLM 功能接入后，也只会发送你明确选择并确认的图片。
           </p>
         </div>
       </div>
