@@ -43,6 +43,14 @@ export const desktopApi = {
     return isTauriRuntime();
   },
 
+  isWindowsDesktopRuntime(): boolean {
+    return (
+      isTauriRuntime() &&
+      typeof navigator !== "undefined" &&
+      navigator.userAgent.includes("Windows")
+    );
+  },
+
   initialSnapshot(): AppSnapshot {
     return structuredClone(browserSnapshot);
   },

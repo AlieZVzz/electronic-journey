@@ -1,9 +1,14 @@
 import { type FormEvent, useEffect, useState } from "react";
 
 import { desktopApi } from "../api/desktop";
+import { SelectControl } from "../components/SelectControl";
 import type { RemoteProfile, SaveRemoteProfileInput } from "../types/app";
 
 const syncIntervals = [15, 30, 60, 120, 240] as const;
+const syncIntervalOptions = syncIntervals.map((minutes) => ({
+  label: `每 ${minutes} 分钟`,
+  value: minutes,
+}));
 
 const emptyProfile: SaveRemoteProfileInput = {
   name: "个人服务器",
@@ -445,21 +450,15 @@ export function StoragePage() {
             自动同步间隔
             <small>从保存配置或上次同步开始计算</small>
           </span>
-          <span className="select-control">
-            <select
-              disabled={operationBusy || !profile.autoSyncEnabled}
-              onChange={(event) =>
-                update("syncIntervalMinutes", Number(event.target.value))
-              }
-              value={profile.syncIntervalMinutes}
-            >
-              {syncIntervals.map((minutes) => (
-                <option key={minutes} value={minutes}>
-                  每 {minutes} 分钟
-                </option>
-              ))}
-            </select>
-          </span>
+          <SelectControl
+            ariaLabel="自动同步间隔"
+            disabled={operationBusy || !profile.autoSyncEnabled}
+            onChange={(syncIntervalMinutes) =>
+              update("syncIntervalMinutes", syncIntervalMinutes)
+            }
+            options={syncIntervalOptions}
+            value={profile.syncIntervalMinutes}
+          />
         </label>
         {profile.autoSyncEnabled && (
           <div className="auto-sync-disclosure" role="note">

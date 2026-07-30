@@ -1,11 +1,17 @@
 import { useState } from "react";
 
+import { SelectControl } from "../components/SelectControl";
 import {
   captureSettingsEqual,
   type RuntimeAction,
 } from "../lib/interactionFeedback";
 import { captureIntervals, validateCaptureSettings } from "../lib/settings";
 import type { CaptureSettings } from "../types/app";
+
+const captureIntervalOptions = captureIntervals.map((interval) => ({
+  label: `每 ${interval} 分钟`,
+  value: interval,
+}));
 
 interface PrivacyPageProps {
   settings: CaptureSettings;
@@ -38,23 +44,17 @@ export function PrivacyPage({
       <div className="settings-panel">
         <label>
           <span>截图间隔</span>
-          <span className="select-control">
-            <select
-              onChange={(event) =>
-                setDraft({
-                  ...draft,
-                  intervalMinutes: Number(event.target.value),
-                })
-              }
-              value={draft.intervalMinutes}
-            >
-              {captureIntervals.map((interval) => (
-                <option key={interval} value={interval}>
-                  每 {interval} 分钟
-                </option>
-              ))}
-            </select>
-          </span>
+          <SelectControl
+            ariaLabel="截图间隔"
+            onChange={(intervalMinutes) =>
+              setDraft({
+                ...draft,
+                intervalMinutes,
+              })
+            }
+            options={captureIntervalOptions}
+            value={draft.intervalMinutes}
+          />
         </label>
 
         <label>

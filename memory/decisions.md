@@ -20,6 +20,12 @@
 - 原因：时间、网速等系统状态变化不应重复占用存储，但聊天新消息、弹窗或内容区单像素变化仍必须保存；明确的系统栏边界比全局近似相似度更可解释、可测试。
 - 影响：去重排除区域只用于摘要，不修改保存的完整截图；平台几何或摘要不可用时保守退回完整像素比较。
 
+## 2026-07-29 - 确定桌面系统最低版本
+
+- 决策：macOS 最低支持 Sequoia 15，Windows 最低支持 Windows 11。
+- Windows 实现：使用 `Windows.Graphics.Capture`、`IGraphicsCaptureItemInterop::CreateForMonitor` 和 D3D11 单帧回读，不维护 Windows 10 兼容分支。
+- 影响：平台 API、权限流程和真机测试均可按上述最低版本设计；发布包仍需保留程序化图形捕获能力声明。
+
 ## 2026-07-28 - 采用 Tauri 2 与 Rust 核心
 
 - 决策：桌面框架使用 Tauri 2，表现层使用 React/TypeScript/Vite，敏感核心使用 Rust。

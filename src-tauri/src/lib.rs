@@ -69,6 +69,10 @@ pub fn run() {
         .manage(RuntimeState::default())
         .setup(|app| {
             trace_startup("setup entered");
+            #[cfg(target_os = "windows")]
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_decorations(false)?;
+            }
             let data_dir = app.path().app_local_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let pool = tauri::async_runtime::block_on(database::connect(

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { desktopApi } from "./api/desktop";
 import { FirstRunOnboarding } from "./components/FirstRunOnboarding";
 import { Sidebar } from "./components/Sidebar";
+import { WindowControls } from "./components/WindowControls";
 import {
   hasCompletedOnboarding,
   markOnboardingComplete,
@@ -23,6 +24,7 @@ const pageTitles: Record<PageId, string> = {
 
 export default function App() {
   const [activePage, setActivePage] = useState<PageId>("today");
+  const isWindowsDesktop = desktopApi.isWindowsDesktopRuntime();
   const [onboardingComplete, setOnboardingComplete] = useState(() =>
     hasCompletedOnboarding(window.localStorage),
   );
@@ -57,11 +59,17 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell${isWindowsDesktop ? " app-shell--windows" : ""}`}
+    >
       <Sidebar activePage={activePage} onNavigate={navigate} />
       <section className="workspace">
-        <header className="titlebar" data-tauri-drag-region>
+        <header
+          className={`titlebar${isWindowsDesktop ? " titlebar--windows" : ""}`}
+          data-tauri-drag-region
+        >
           <strong data-tauri-drag-region>{pageTitles[activePage]}</strong>
+          {isWindowsDesktop && <WindowControls />}
         </header>
         <main className="main-content">
           <div className="content-frame">
