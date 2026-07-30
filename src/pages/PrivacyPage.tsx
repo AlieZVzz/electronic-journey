@@ -38,25 +38,30 @@ export function PrivacyPage({
       <div className="settings-panel">
         <label>
           <span>截图间隔</span>
-          <select
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                intervalMinutes: Number(event.target.value),
-              })
-            }
-            value={draft.intervalMinutes}
-          >
-            {captureIntervals.map((interval) => (
-              <option key={interval} value={interval}>
-                每 {interval} 分钟
-              </option>
-            ))}
-          </select>
+          <span className="select-control">
+            <select
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  intervalMinutes: Number(event.target.value),
+                })
+              }
+              value={draft.intervalMinutes}
+            >
+              {captureIntervals.map((interval) => (
+                <option key={interval} value={interval}>
+                  每 {interval} 分钟
+                </option>
+              ))}
+            </select>
+          </span>
         </label>
 
         <label>
-          <span>空闲暂停</span>
+          <span>
+            空闲暂停
+            <small>连续空闲达到该分钟数后暂停；设为 0 可关闭。</small>
+          </span>
           <input
             max={240}
             min={0}

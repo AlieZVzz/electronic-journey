@@ -11,6 +11,7 @@ describe("interaction feedback", () => {
     expect(recordingActionLabel("stopped", "running")).toBe("正在开始…");
     expect(recordingActionLabel("running", "paused")).toBe("正在暂停…");
     expect(recordingActionLabel("paused", "stopped")).toBe("正在停止…");
+    expect(recordingActionLabel("suspended", null)).toBe("暂停记录");
   });
 
   it("explains the verified recording result", () => {

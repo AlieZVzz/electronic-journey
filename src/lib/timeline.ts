@@ -1,9 +1,23 @@
-import type { TimelineCapture } from "../types/app";
+import type {
+  TimelineCapture,
+  TimelineSelectionItem,
+} from "../types/app";
 
 export interface TimelineGroup {
   dateKey: string;
   label: string;
   items: TimelineCapture[];
+}
+
+export function addTimelineSelection(
+  current: Map<string, number>,
+  items: TimelineSelectionItem[],
+): Map<string, number> {
+  const next = new Map(current);
+  for (const item of items) {
+    next.set(item.id, item.fileSize);
+  }
+  return next;
 }
 
 function dateKey(value: string, timeZone?: string): string {

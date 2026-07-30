@@ -27,7 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 sqlx = { version = "0.8", features = ["chrono", "migrate", "runtime-tokio", "sqlite", "uuid"] }
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["image-png", "tray-icon"] }
 tauri-plugin-dialog = "2.7.2"
 thiserror.workspace = true
 tokio.workspace = true
@@ -36,10 +36,22 @@ uuid.workspace = true
 zeroize = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+core-foundation = "0.10.1"
+core-foundation-sys = "0.8.7"
 core-graphics = "0.25"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSScreen", "NSWorkspace", "objc2-core-graphics"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSGeometry", "NSNotification", "NSOperation", "NSString", "block2"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
     "Graphics_Capture",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
     "Security_Authorization_AppCapabilityAccess",
 ] }

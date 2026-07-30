@@ -56,4 +56,29 @@ mod tests {
             CaptureDecision::Blocked(PrivacyReason::ScreenLocked)
         );
     }
+
+    #[test]
+    fn blocker_priority_is_lock_then_sleep_then_idle() {
+        let mut context = PrivacyContext {
+            recording_enabled: true,
+            screen_locked: true,
+            system_sleeping: true,
+            user_idle: true,
+            excluded_application_active: false,
+        };
+        assert_eq!(
+            evaluate(&context),
+            CaptureDecision::Blocked(PrivacyReason::ScreenLocked)
+        );
+        context.screen_locked = false;
+        assert_eq!(
+            evaluate(&context),
+            CaptureDecision::Blocked(PrivacyReason::SystemSleeping)
+        );
+        context.system_sleeping = false;
+        assert_eq!(
+            evaluate(&context),
+            CaptureDecision::Blocked(PrivacyReason::UserIdle)
+        );
+    }
 }

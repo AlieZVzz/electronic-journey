@@ -6,7 +6,7 @@ use std::{
     time::Duration as StdDuration,
 };
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager, State};
@@ -17,11 +17,13 @@ use crate::{
     capture::{CaptureError, PermissionState, PlatformCapture, ScreenCapture},
     capture_pipeline,
     error::AppError,
+    privacy::{self, CaptureDecision, PrivacyContext, PrivacyReason},
     scheduler::{next_capture_at, FIRST_CAPTURE_DELAY},
+    system_monitor::SystemEvent,
     timeline, upload,
 };
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordingState {
     #[default]
@@ -30,6 +32,14 @@ pub enum RecordingState {
     Paused,
     Suspended,
     Degraded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuspensionReason {
+    ScreenLocked,
+    SystemSleeping,
+    UserIdle,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -70,6 +80,7 @@ impl CaptureSettings {
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
     state: RecordingState,
+    suspension_reason: Option<SuspensionReason>,
     next_capture_at: Option<String>,
     today_count: u32,
     local_storage_bytes: u64,
@@ -84,6 +95,7 @@ impl Default for AppSnapshot {
     fn default() -> Self {
         Self {
             state: RecordingState::Stopped,
+            suspension_reason: None,
             next_capture_at: None,
             today_count: 0,
             local_storage_bytes: 0,
@@ -97,10 +109,27 @@ impl Default for AppSnapshot {
 }
 
 #[derive(Default)]
+struct SystemConditions {
+    screen_locked: bool,
+    system_sleeping: bool,
+    user_idle: bool,
+}
+
+#[derive(Default)]
 pub struct RuntimeState {
     snapshot: Mutex<AppSnapshot>,
+    system_conditions: Mutex<SystemConditions>,
     schedule_generation: AtomicU64,
+    recording_requested: AtomicBool,
+    system_monitor_ready: AtomicBool,
     startup_recovery_started: AtomicBool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeSummary {
+    pub state: RecordingState,
+    pub suspension_reason: Option<SuspensionReason>,
+    pub permission_state: PermissionState,
 }
 
 impl RuntimeState {
@@ -121,15 +150,56 @@ impl RuntimeState {
 
         Self {
             snapshot: Mutex::new(snapshot),
+            system_conditions: Mutex::new(SystemConditions::default()),
             schedule_generation: AtomicU64::new(0),
+            recording_requested: AtomicBool::new(false),
+            system_monitor_ready: AtomicBool::new(true),
             startup_recovery_started: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn system_monitor_ready(&self) {
+        self.system_monitor_ready.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn system_monitor_failed(&self) {
+        self.system_monitor_ready.store(false, Ordering::SeqCst);
+        self.recording_requested.store(false, Ordering::SeqCst);
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            if matches!(
+                snapshot.state,
+                RecordingState::Running | RecordingState::Suspended
+            ) {
+                snapshot.state = RecordingState::Degraded;
+            }
+            snapshot.suspension_reason = None;
+            snapshot.next_capture_at = None;
+            snapshot.last_error =
+                Some("无法监听系统锁屏、休眠或空闲状态，记录已停止；请重新启动应用。".into());
+        }
+        self.schedule_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn idle_pause_threshold(&self) -> Option<StdDuration> {
+        let minutes = self.snapshot.lock().ok()?.settings.idle_pause_minutes;
+        (minutes > 0).then(|| StdDuration::from_secs(u64::from(minutes) * 60))
     }
 
     fn snapshot(&self) -> Result<AppSnapshot, AppError> {
         self.snapshot
             .lock()
             .map(|snapshot| snapshot.clone())
+            .map_err(|_| AppError::StatePoisoned)
+    }
+
+    pub(crate) fn summary(&self) -> Result<RuntimeSummary, AppError> {
+        self.snapshot
+            .lock()
+            .map(|snapshot| RuntimeSummary {
+                state: snapshot.state,
+                suspension_reason: snapshot.suspension_reason,
+                permission_state: snapshot.permission_state,
+            })
             .map_err(|_| AppError::StatePoisoned)
     }
 
@@ -141,20 +211,41 @@ impl RuntimeState {
             return Err(AppError::InvalidStateTransition);
         }
 
+        if matches!(state, RecordingState::Running)
+            && !self.system_monitor_ready.load(Ordering::SeqCst)
+        {
+            return Err(AppError::SystemMonitorUnavailable);
+        }
+
+        let conditions = self
+            .system_conditions
+            .lock()
+            .map_err(|_| AppError::StatePoisoned)?;
         let mut snapshot = self.snapshot.lock().map_err(|_| AppError::StatePoisoned)?;
         if matches!(state, RecordingState::Running) && !snapshot.permission_granted {
             return Err(AppError::CapturePermissionRequired);
         }
-        snapshot.state = state;
+        self.recording_requested
+            .store(matches!(state, RecordingState::Running), Ordering::SeqCst);
+        let suspension_reason = matches!(state, RecordingState::Running)
+            .then(|| suspension_reason(&conditions))
+            .flatten();
+        snapshot.state = if suspension_reason.is_some() {
+            RecordingState::Suspended
+        } else {
+            state
+        };
+        snapshot.suspension_reason = suspension_reason;
         snapshot.last_error = None;
-        snapshot.next_capture_at = match state {
+        snapshot.next_capture_at = match snapshot.state {
             RecordingState::Running => {
                 Some(next_capture_at(Utc::now(), FIRST_CAPTURE_DELAY).to_rfc3339())
             }
             _ => None,
         };
         let generation = self.schedule_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let delay = matches!(state, RecordingState::Running).then_some(FIRST_CAPTURE_DELAY);
+        let delay =
+            matches!(snapshot.state, RecordingState::Running).then_some(FIRST_CAPTURE_DELAY);
         Ok((snapshot.clone(), generation, delay))
     }
 
@@ -173,9 +264,14 @@ impl RuntimeState {
                     None
                 };
                 if permission_state != PermissionState::Granted
-                    && matches!(snapshot.state, RecordingState::Running)
+                    && matches!(
+                        snapshot.state,
+                        RecordingState::Running | RecordingState::Suspended
+                    )
                 {
+                    self.recording_requested.store(false, Ordering::SeqCst);
                     snapshot.state = RecordingState::Degraded;
+                    snapshot.suspension_reason = None;
                     snapshot.next_capture_at = None;
                     snapshot.last_error =
                         Some("屏幕录制权限已失效，记录已停止，请重新授权。".into());
@@ -187,8 +283,13 @@ impl RuntimeState {
                 snapshot.permission_state = PermissionState::NotDetermined;
                 snapshot.last_error =
                     Some("无法完成屏幕录制权限请求，请检查系统设置后重试。".into());
-                if matches!(snapshot.state, RecordingState::Running) {
+                if matches!(
+                    snapshot.state,
+                    RecordingState::Running | RecordingState::Suspended
+                ) {
+                    self.recording_requested.store(false, Ordering::SeqCst);
                     snapshot.state = RecordingState::Degraded;
+                    snapshot.suspension_reason = None;
                     snapshot.next_capture_at = None;
                     self.schedule_generation.fetch_add(1, Ordering::SeqCst);
                 }
@@ -210,6 +311,20 @@ impl RuntimeState {
             delay.map(|delay| next_capture_at(Utc::now(), delay).to_rfc3339());
         let generation = self.schedule_generation.fetch_add(1, Ordering::SeqCst) + 1;
         Ok((snapshot.clone(), generation, delay))
+    }
+
+    pub(crate) fn restore_settings(&self, settings: CaptureSettings) -> Result<(), AppError> {
+        settings.validate()?;
+        let mut snapshot = self.snapshot.lock().map_err(|_| AppError::StatePoisoned)?;
+        snapshot.settings = settings;
+        Ok(())
+    }
+
+    pub(crate) fn set_settings_recovery_error(&self) {
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            snapshot.last_error =
+                Some("无法恢复已保存的截图设置，当前已使用默认设置；请重新保存设置。".into());
+        }
     }
 
     pub fn set_inventory(&self, count: u32, bytes: u64) {
@@ -284,6 +399,7 @@ impl RuntimeState {
         }
         if let Ok(mut snapshot) = self.snapshot.lock() {
             snapshot.state = RecordingState::Degraded;
+            snapshot.suspension_reason = None;
             snapshot.next_capture_at = None;
             snapshot.last_error = Some(message);
             if permission_denied {
@@ -291,8 +407,98 @@ impl RuntimeState {
                 snapshot.permission_state = PermissionState::Denied;
             }
         }
+        self.recording_requested.store(false, Ordering::SeqCst);
         self.schedule_generation.fetch_add(1, Ordering::SeqCst);
     }
+
+    fn apply_system_event(
+        &self,
+        event: SystemEvent,
+    ) -> Result<Option<(u64, StdDuration)>, AppError> {
+        let mut conditions = self
+            .system_conditions
+            .lock()
+            .map_err(|_| AppError::StatePoisoned)?;
+        match event {
+            SystemEvent::ScreenLocked => conditions.screen_locked = true,
+            SystemEvent::ScreenUnlocked => conditions.screen_locked = false,
+            SystemEvent::Sleep => conditions.system_sleeping = true,
+            SystemEvent::Wake => conditions.system_sleeping = false,
+            SystemEvent::UserIdle(idle) => conditions.user_idle = idle,
+        }
+
+        let requested = self.recording_requested.load(Ordering::SeqCst);
+        let reason = requested.then(|| suspension_reason(&conditions)).flatten();
+        let mut snapshot = self.snapshot.lock().map_err(|_| AppError::StatePoisoned)?;
+
+        if let Some(reason) = reason {
+            let changed = snapshot.state != RecordingState::Suspended
+                || snapshot.suspension_reason != Some(reason);
+            snapshot.state = RecordingState::Suspended;
+            snapshot.suspension_reason = Some(reason);
+            snapshot.next_capture_at = None;
+            if changed {
+                self.schedule_generation.fetch_add(1, Ordering::SeqCst);
+            }
+            return Ok(None);
+        }
+
+        snapshot.suspension_reason = None;
+        if requested
+            && snapshot.permission_granted
+            && self.system_monitor_ready.load(Ordering::SeqCst)
+            && snapshot.state == RecordingState::Suspended
+        {
+            snapshot.state = RecordingState::Running;
+            snapshot.last_error = None;
+            snapshot.next_capture_at =
+                Some(next_capture_at(Utc::now(), FIRST_CAPTURE_DELAY).to_rfc3339());
+            let generation = self.schedule_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            return Ok(Some((generation, FIRST_CAPTURE_DELAY)));
+        }
+        Ok(None)
+    }
+}
+
+fn suspension_reason(conditions: &SystemConditions) -> Option<SuspensionReason> {
+    match privacy::evaluate(&PrivacyContext {
+        recording_enabled: true,
+        screen_locked: conditions.screen_locked,
+        system_sleeping: conditions.system_sleeping,
+        user_idle: conditions.user_idle,
+        excluded_application_active: false,
+    }) {
+        CaptureDecision::Blocked(PrivacyReason::ScreenLocked) => {
+            Some(SuspensionReason::ScreenLocked)
+        }
+        CaptureDecision::Blocked(PrivacyReason::SystemSleeping) => {
+            Some(SuspensionReason::SystemSleeping)
+        }
+        CaptureDecision::Blocked(PrivacyReason::UserIdle) => Some(SuspensionReason::UserIdle),
+        CaptureDecision::Allow
+        | CaptureDecision::Blocked(PrivacyReason::RecordingDisabled)
+        | CaptureDecision::Blocked(PrivacyReason::ExcludedApplication) => None,
+    }
+}
+
+pub(crate) fn handle_system_event(app: &AppHandle, event: SystemEvent) {
+    let runtime = app.state::<RuntimeState>();
+    if let Ok(Some((generation, delay))) = runtime.apply_system_event(event) {
+        spawn_capture_loop(app.clone(), generation, delay);
+    }
+    crate::tray::refresh(app);
+}
+
+pub(crate) fn apply_recording_state(
+    app: &AppHandle,
+    state: RecordingState,
+) -> Result<AppSnapshot, AppError> {
+    let runtime = app.state::<RuntimeState>();
+    let (snapshot, generation, delay) = runtime.set_state(state)?;
+    if let Some(delay) = delay {
+        spawn_capture_loop(app.clone(), generation, delay);
+    }
+    Ok(snapshot)
 }
 
 fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration) {
@@ -312,7 +518,10 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
                     .find(|display| display.is_primary)
                     .or_else(|| displays.first())
                     .ok_or_else(|| CaptureError::DisplayUnavailable("primary".into()))?;
-                let captured = PlatformCapture.capture(&display.id).await?;
+                let mut captured = PlatformCapture.capture(&display.id).await?;
+                captured.comparison_exclusions = PlatformCapture
+                    .comparison_exclusions(&app, &display.id, captured.width, captured.height)
+                    .await;
                 Ok::<_, CaptureError>((captured, display.id.0.clone()))
             }
             .await;
@@ -325,6 +534,7 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
                         "屏幕录制权限已失效，请在系统设置中重新允许。".into(),
                         true,
                     );
+                    crate::tray::refresh(&app);
                     return;
                 }
                 Err(_) => {
@@ -333,6 +543,7 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
                         "系统截图失败，记录已停止；请检查屏幕录制权限和显示器状态。".into(),
                         false,
                     );
+                    crate::tray::refresh(&app);
                     return;
                 }
             };
@@ -373,6 +584,7 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
                         "截图未能写入本地存储，记录已停止。".into(),
                         false,
                     );
+                    crate::tray::refresh(&app);
                     return;
                 }
             }
@@ -395,6 +607,7 @@ pub async fn get_app_snapshot(
 
 #[tauri::command]
 pub async fn refresh_screen_capture_permission(
+    app: AppHandle,
     state: State<'_, RuntimeState>,
 ) -> Result<AppSnapshot, String> {
     crate::trace_startup("permission refresh started");
@@ -402,31 +615,35 @@ pub async fn refresh_screen_capture_permission(
     let snapshot = state
         .update_permission(permission_result)
         .map_err(|error| error.to_string())?;
+    crate::tray::refresh(&app);
     crate::trace_startup("permission refresh finished");
     Ok(snapshot)
 }
 
 #[tauri::command]
-pub fn set_recording_state(
-    state: RecordingState,
-    runtime: State<'_, RuntimeState>,
-    app: AppHandle,
-) -> Result<AppSnapshot, String> {
-    let (snapshot, generation, delay) = runtime
-        .set_state(state)
-        .map_err(|error| error.to_string())?;
-    if let Some(delay) = delay {
-        spawn_capture_loop(app, generation, delay);
-    }
+pub fn set_recording_state(state: RecordingState, app: AppHandle) -> Result<AppSnapshot, String> {
+    let snapshot = apply_recording_state(&app, state).map_err(|error| error.to_string())?;
+    crate::tray::refresh(&app);
     Ok(snapshot)
 }
 
 #[tauri::command]
-pub fn update_capture_settings(
+pub async fn update_capture_settings(
     settings: CaptureSettings,
     runtime: State<'_, RuntimeState>,
+    pool: State<'_, SqlitePool>,
     app: AppHandle,
 ) -> Result<AppSnapshot, String> {
+    settings.validate().map_err(|error| error.to_string())?;
+    crate::database::save_capture_settings(
+        pool.inner(),
+        &crate::database::CaptureSettingsRecord {
+            interval_minutes: settings.interval_minutes,
+            idle_pause_minutes: settings.idle_pause_minutes,
+        },
+    )
+    .await
+    .map_err(|_| "无法保存截图设置。".to_string())?;
     let (snapshot, generation, delay) = runtime
         .update_settings(settings)
         .map_err(|error| error.to_string())?;
@@ -438,6 +655,7 @@ pub fn update_capture_settings(
 
 #[tauri::command]
 pub async fn request_screen_capture_permission(
+    app: AppHandle,
     runtime: State<'_, RuntimeState>,
 ) -> Result<AppSnapshot, String> {
     let permission_result = PlatformCapture.request_permission().await;
@@ -467,9 +685,11 @@ pub async fn request_screen_capture_permission(
         other => other,
     };
 
-    runtime
+    let snapshot = runtime
         .update_permission(permission_result)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    crate::tray::refresh(&app);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -481,6 +701,41 @@ pub async fn list_timeline_captures(
     timeline::list_captures(pool.inner(), offset, limit)
         .await
         .map_err(|_| "无法读取本地时间线，请稍后重试。".to_string())
+}
+
+#[tauri::command]
+pub async fn list_timeline_day_selection(
+    pool: State<'_, SqlitePool>,
+    date_key: String,
+) -> Result<Vec<timeline::TimelineSelectionItem>, String> {
+    let date = NaiveDate::parse_from_str(&date_key, "%Y-%m-%d")
+        .map_err(|_| "时间线日期无效。".to_string())?;
+    let next_date = date
+        .succ_opt()
+        .ok_or_else(|| "时间线日期无效。".to_string())?;
+    let start = Local
+        .from_local_datetime(
+            &date
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(|| "时间线日期无效。".to_string())?,
+        )
+        .earliest()
+        .ok_or_else(|| "无法确定当天的系统时区边界。".to_string())?;
+    let end = Local
+        .from_local_datetime(
+            &next_date
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(|| "时间线日期无效。".to_string())?,
+        )
+        .earliest()
+        .ok_or_else(|| "无法确定当天的系统时区边界。".to_string())?;
+    timeline::list_selection_between(
+        pool.inner(),
+        start.with_timezone(&Utc),
+        end.with_timezone(&Utc),
+    )
+    .await
+    .map_err(|_| "无法选择当天的截图，请稍后重试。".to_string())
 }
 
 #[tauri::command]
@@ -1136,5 +1391,142 @@ mod tests {
         assert_eq!(snapshot.local_storage_bytes, 600);
         assert!(snapshot.next_capture_at.is_some());
         assert!(matches!(snapshot.state, RecordingState::Running));
+    }
+
+    #[test]
+    fn lock_suspends_and_unlock_resumes_after_the_first_capture_delay() {
+        let runtime = RuntimeState::from_permission_result(Ok(PermissionState::Granted));
+        let (_, original_generation, _) = runtime.set_state(RecordingState::Running).unwrap();
+
+        assert!(runtime
+            .apply_system_event(SystemEvent::ScreenLocked)
+            .unwrap()
+            .is_none());
+        let suspended = runtime.snapshot().unwrap();
+        assert_eq!(suspended.state, RecordingState::Suspended);
+        assert_eq!(
+            suspended.suspension_reason,
+            Some(SuspensionReason::ScreenLocked)
+        );
+        assert!(suspended.next_capture_at.is_none());
+        assert!(!runtime.schedule_is_active(original_generation));
+
+        let resumed = runtime
+            .apply_system_event(SystemEvent::ScreenUnlocked)
+            .unwrap();
+        assert_eq!(resumed.map(|(_, delay)| delay), Some(FIRST_CAPTURE_DELAY));
+        let snapshot = runtime.snapshot().unwrap();
+        assert_eq!(snapshot.state, RecordingState::Running);
+        assert!(snapshot.suspension_reason.is_none());
+        assert!(snapshot.next_capture_at.is_some());
+    }
+
+    #[test]
+    fn clearing_one_of_multiple_system_blockers_does_not_resume_recording() {
+        let runtime = RuntimeState::from_permission_result(Ok(PermissionState::Granted));
+        runtime.set_state(RecordingState::Running).unwrap();
+        runtime
+            .apply_system_event(SystemEvent::ScreenLocked)
+            .unwrap();
+        runtime.apply_system_event(SystemEvent::Sleep).unwrap();
+
+        assert!(runtime
+            .apply_system_event(SystemEvent::Wake)
+            .unwrap()
+            .is_none());
+        let snapshot = runtime.snapshot().unwrap();
+        assert_eq!(snapshot.state, RecordingState::Suspended);
+        assert_eq!(
+            snapshot.suspension_reason,
+            Some(SuspensionReason::ScreenLocked)
+        );
+
+        assert!(runtime
+            .apply_system_event(SystemEvent::ScreenUnlocked)
+            .unwrap()
+            .is_some());
+        assert_eq!(runtime.snapshot().unwrap().state, RecordingState::Running);
+    }
+
+    #[test]
+    fn user_pause_while_suspended_prevents_automatic_resume() {
+        let runtime = RuntimeState::from_permission_result(Ok(PermissionState::Granted));
+        runtime.set_state(RecordingState::Running).unwrap();
+        runtime
+            .apply_system_event(SystemEvent::UserIdle(true))
+            .unwrap();
+
+        let (snapshot, _, delay) = runtime.set_state(RecordingState::Paused).unwrap();
+        assert_eq!(snapshot.state, RecordingState::Paused);
+        assert!(snapshot.suspension_reason.is_none());
+        assert!(delay.is_none());
+        assert!(runtime
+            .apply_system_event(SystemEvent::UserIdle(false))
+            .unwrap()
+            .is_none());
+        assert_eq!(runtime.snapshot().unwrap().state, RecordingState::Paused);
+    }
+
+    #[test]
+    fn starting_while_idle_preserves_user_intent_without_scheduling() {
+        let runtime = RuntimeState::from_permission_result(Ok(PermissionState::Granted));
+        runtime
+            .apply_system_event(SystemEvent::UserIdle(true))
+            .unwrap();
+
+        let (snapshot, _, delay) = runtime.set_state(RecordingState::Running).unwrap();
+        assert_eq!(snapshot.state, RecordingState::Suspended);
+        assert_eq!(snapshot.suspension_reason, Some(SuspensionReason::UserIdle));
+        assert!(delay.is_none());
+
+        assert!(runtime
+            .apply_system_event(SystemEvent::UserIdle(false))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn monitor_failure_stops_recording_and_blocks_restart() {
+        let runtime = RuntimeState::from_permission_result(Ok(PermissionState::Granted));
+        runtime.set_state(RecordingState::Running).unwrap();
+
+        runtime.system_monitor_failed();
+
+        let snapshot = runtime.snapshot().unwrap();
+        assert_eq!(snapshot.state, RecordingState::Degraded);
+        assert!(snapshot.next_capture_at.is_none());
+        assert!(snapshot.last_error.is_some());
+        assert!(matches!(
+            runtime.set_state(RecordingState::Running),
+            Err(AppError::SystemMonitorUnavailable)
+        ));
+    }
+
+    #[test]
+    fn zero_idle_pause_minutes_disables_idle_detection() {
+        let runtime = RuntimeState::from_permission_result(Ok(PermissionState::Granted));
+        runtime
+            .update_settings(CaptureSettings {
+                interval_minutes: 5,
+                idle_pause_minutes: 0,
+            })
+            .unwrap();
+
+        assert_eq!(runtime.idle_pause_threshold(), None);
+    }
+
+    #[test]
+    fn saved_settings_can_be_restored_into_a_fresh_runtime() {
+        let runtime = RuntimeState::default();
+        runtime
+            .restore_settings(CaptureSettings {
+                interval_minutes: 30,
+                idle_pause_minutes: 45,
+            })
+            .unwrap();
+
+        let snapshot = runtime.snapshot().unwrap();
+        assert_eq!(snapshot.settings.interval_minutes, 30);
+        assert_eq!(snapshot.settings.idle_pause_minutes, 45);
     }
 }

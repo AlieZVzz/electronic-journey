@@ -15,7 +15,9 @@ export function recordingActionLabel(
   if (pendingState === "stopped") {
     return "正在停止…";
   }
-  return currentState === "running" ? "暂停记录" : "开始记录";
+  return currentState === "running" || currentState === "suspended"
+    ? "暂停记录"
+    : "开始记录";
 }
 
 export function recordingSuccessMessage(state: RecordingState): string {

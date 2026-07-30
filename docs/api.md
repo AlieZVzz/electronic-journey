@@ -1,4 +1,25 @@
-# 桌面客户端远程存储命令边界
+# 桌面客户端命令边界
+
+## 本地记录状态
+
+```text
+get_app_snapshot()
+set_recording_state(state)
+update_capture_settings(settings)
+list_timeline_day_selection(date_key)
+refresh_screen_capture_permission()
+request_screen_capture_permission()
+```
+
+- `AppSnapshot.state` 可为 `stopped`、`running`、`paused`、`suspended` 或 `degraded`。
+- `suspended` 时 `suspensionReason` 明确区分 `screen_locked`、`system_sleeping` 和 `user_idle`，且 `nextCaptureAt` 为空。
+- 前端只能请求开始、暂停或停止，不能直接伪造 `suspended` 或 `degraded`；系统事件和错误状态仅由 Rust 核心产生。
+- `idlePauseMinutes` 接受 0 至 240；0 表示不因用户空闲自动暂停。
+- `update_capture_settings` 验证后将截图间隔和空闲暂停设置写入本地 SQLite；应用启动时恢复已保存值，缺失记录时才使用默认值。
+- `list_timeline_day_selection` 按当前系统时区解析 `YYYY-MM-DD`，只返回当天全部截图的 ID 和大小，用于跨分页选择，不读取图片内容。
+- Rust 在主窗口之外的托盘操作或系统事件改变状态后发送 `runtime-state-changed`，事件不携带截图或状态正文；前端收到后重新调用 `get_app_snapshot`。
+
+## 远程存储
 
 客户端不调用 LLM，也不感知远端 Hermes。远程能力仅用于把用户明确选择并确认的本地原图上传到个人 SFTP 文件夹。
 

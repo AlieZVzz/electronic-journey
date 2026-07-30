@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { groupTimelineCaptures } from "./timeline";
+import {
+  addTimelineSelection,
+  groupTimelineCaptures,
+} from "./timeline";
 
 describe("timeline grouping", () => {
   it("groups captures by the selected display timezone", () => {
@@ -42,6 +45,25 @@ describe("timeline grouping", () => {
     expect(groupTimelineCaptures(captures, "UTC")[0].items.map(({ id }) => id)).toEqual([
       "newer",
       "older",
+    ]);
+  });
+});
+
+describe("timeline day selection", () => {
+  it("adds unloaded day items without discarding existing selections", () => {
+    const current = new Map([["already-selected", 10]]);
+    const next = addTimelineSelection(current, [
+      { id: "loaded", fileSize: 20 },
+      { id: "not-loaded", fileSize: 30 },
+    ]);
+
+    expect(Array.from(next.entries())).toEqual([
+      ["already-selected", 10],
+      ["loaded", 20],
+      ["not-loaded", 30],
+    ]);
+    expect(Array.from(current.entries())).toEqual([
+      ["already-selected", 10],
     ]);
   });
 });

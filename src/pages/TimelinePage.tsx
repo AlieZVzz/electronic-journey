@@ -8,7 +8,10 @@ import {
 } from "react";
 
 import { desktopApi } from "../api/desktop";
-import { groupTimelineCaptures } from "../lib/timeline";
+import {
+  addTimelineSelection,
+  groupTimelineCaptures,
+} from "../lib/timeline";
 import type {
   TimelineCapture,
   UploadBatchProgress,
@@ -151,9 +154,10 @@ export function TimelinePage() {
   const [deleteCandidate, setDeleteCandidate] =
     useState<TimelineCapture | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(
-    () => new Set(),
+  const [selectedItems, setSelectedItems] = useState<Map<string, number>>(
+    () => new Map(),
   );
+  const [selectingDay, setSelectingDay] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] =
     useState<UploadBatchProgress | null>(null);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
@@ -171,6 +175,10 @@ export function TimelinePage() {
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const deleteCancelButtonRef = useRef<HTMLButtonElement | null>(null);
   const groups = useMemo(() => groupTimelineCaptures(captures), [captures]);
+  const selectedIds = useMemo(
+    () => new Set(selectedItems.keys()),
+    [selectedItems],
+  );
   const uploadActive =
     uploadProgress?.state === "pending" ||
     uploadProgress?.state === "uploading";
@@ -266,13 +274,6 @@ export function TimelinePage() {
             ...page.items.filter(({ id }) => !known.has(id)),
           ];
         });
-        if (replace) {
-          const visibleIds = new Set(page.items.map(({ id }) => id));
-          setSelectedIds(
-            (current) =>
-              new Set(Array.from(current).filter((id) => visibleIds.has(id))),
-          );
-        }
         setNextOffset(page.nextOffset);
         if (action === "refresh") {
           setActionMessage(
@@ -600,8 +601,8 @@ export function TimelinePage() {
       setCaptures((current) =>
         current.filter(({ id }) => id !== capture.id),
       );
-      setSelectedIds((current) => {
-        const next = new Set(current);
+      setSelectedItems((current) => {
+        const next = new Map(current);
         next.delete(capture.id);
         return next;
       });
@@ -622,13 +623,13 @@ export function TimelinePage() {
     }
   }
 
-  function toggleCaptureSelection(captureId: string) {
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      if (next.has(captureId)) {
-        next.delete(captureId);
+  function toggleCaptureSelection(capture: TimelineCapture) {
+    setSelectedItems((current) => {
+      const next = new Map(current);
+      if (next.has(capture.id)) {
+        next.delete(capture.id);
       } else {
-        next.add(captureId);
+        next.set(capture.id, capture.fileSize);
       }
       return next;
     });
@@ -637,29 +638,58 @@ export function TimelinePage() {
   }
 
   function toggleAllLoadedCaptures() {
-    setSelectedIds((current) => {
+    setSelectedItems((current) => {
       const allLoadedSelected =
         captures.length > 0 &&
         captures.every((capture) => current.has(capture.id));
-      return allLoadedSelected
-        ? new Set()
-        : new Set(captures.map((capture) => capture.id));
+      if (allLoadedSelected) {
+        return new Map();
+      }
+      const next = new Map(current);
+      for (const capture of captures) {
+        next.set(capture.id, capture.fileSize);
+      }
+      return next;
     });
     setUploadConfirmation(null);
     setUploadMessage(null);
+  }
+
+  async function selectEntireDay(dateKey: string) {
+    if (selectingDay !== null) {
+      return;
+    }
+    setSelectingDay(dateKey);
+    setError(null);
+    setActionMessage(null);
+    setUploadConfirmation(null);
+    setUploadMessage(null);
+    try {
+      const dayItems =
+        await desktopApi.listTimelineDaySelection(dateKey);
+      setSelectedItems((current) =>
+        addTimelineSelection(current, dayItems),
+      );
+      setActionMessage(`已选择当天全部 ${dayItems.length} 张截图。`);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setSelectingDay(null);
+    }
   }
 
   function prepareUploadSelection() {
     if (selectedIds.size === 0 || uploadActive || startingUpload) {
       return;
     }
-    const selected = captures.filter((capture) =>
-      selectedIds.has(capture.id),
-    );
+    if (selectedItems.size > 500) {
+      setError("单次最多上传 500 张截图，请取消部分选择后重试。");
+      return;
+    }
     setUploadConfirmation({
-      captureIds: selected.map((capture) => capture.id),
-      totalBytes: selected.reduce(
-        (total, capture) => total + capture.fileSize,
+      captureIds: Array.from(selectedItems.keys()),
+      totalBytes: Array.from(selectedItems.values()).reduce(
+        (total, fileSize) => total + fileSize,
         0,
       ),
     });
@@ -686,7 +716,7 @@ export function TimelinePage() {
       setUploadMessage(
         `已开始在后台上传 ${progress.totalItems} 张原图；可以继续浏览或切换页面。`,
       );
-      setSelectedIds(new Set());
+      setSelectedItems(new Map());
       window.dispatchEvent(
         new Event("electronic-journey:snapshot-changed"),
       );
@@ -774,7 +804,22 @@ export function TimelinePage() {
             <section className="timeline-day" key={group.dateKey}>
               <div className="timeline-day__heading">
                 <h2>{group.label}</h2>
-                <span>{group.items.length} 张</span>
+                <div className="timeline-day__actions">
+                  <span>{group.items.length} 张已加载</span>
+                  <button
+                    aria-busy={selectingDay === group.dateKey}
+                    className="timeline-day__select-all"
+                    disabled={selectingDay !== null}
+                    onClick={() =>
+                      void selectEntireDay(group.dateKey)
+                    }
+                    type="button"
+                  >
+                    {selectingDay === group.dateKey
+                      ? "正在选择…"
+                      : "全选当天"}
+                  </button>
+                </div>
               </div>
               <div className="timeline-grid">
                 {group.items.map((capture) => {
@@ -798,7 +843,7 @@ export function TimelinePage() {
                           )} 的截图`}
                           checked={selectedIds.has(capture.id)}
                           onChange={() =>
-                            toggleCaptureSelection(capture.id)
+                            toggleCaptureSelection(capture)
                           }
                           type="checkbox"
                         />
@@ -961,7 +1006,7 @@ export function TimelinePage() {
           </button>
           <button
             onClick={() => {
-              toggleCaptureSelection(contextMenu.capture.id);
+              toggleCaptureSelection(contextMenu.capture);
               setContextMenu(null);
             }}
             role="menuitem"

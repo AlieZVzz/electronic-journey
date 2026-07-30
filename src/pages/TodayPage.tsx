@@ -44,6 +44,37 @@ function formatNextCapture(value: string | null): string {
   }).format(new Date(value));
 }
 
+function suspensionMessage(snapshot: AppSnapshot): {
+  heading: string;
+  detail: string;
+} | null {
+  if (snapshot.state !== "suspended") {
+    return null;
+  }
+  switch (snapshot.suspensionReason) {
+    case "screen_locked":
+      return {
+        heading: "屏幕已锁定，记录暂挂",
+        detail: "解锁且其他暂停条件解除后，将等待 10 秒再恢复截图。",
+      };
+    case "system_sleeping":
+      return {
+        heading: "系统正在休眠，记录暂挂",
+        detail: "唤醒且其他暂停条件解除后，将等待 10 秒再恢复截图。",
+      };
+    case "user_idle":
+      return {
+        heading: "检测到用户空闲，记录暂挂",
+        detail: "恢复键盘或鼠标操作后，将等待 10 秒再恢复截图。",
+      };
+    default:
+      return {
+        heading: "系统条件暂不允许截图",
+        detail: "条件解除后，将等待 10 秒再恢复截图。",
+      };
+  }
+}
+
 export function TodayPage({
   snapshot,
   loading,
@@ -53,6 +84,9 @@ export function TodayPage({
   onStateChange,
 }: TodayPageProps) {
   const isRunning = snapshot.state === "running";
+  const isRecordingRequested =
+    isRunning || snapshot.state === "suspended";
+  const suspension = suspensionMessage(snapshot);
   const recordingPending = pendingAction === "recording";
   const [showPermissionDisclosure, setShowPermissionDisclosure] =
     useState(false);
@@ -164,11 +198,15 @@ export function TodayPage({
           <i />
         </span>
         <div className="hero-card__copy">
-          <h2>{isRunning ? "正在记录你的数字旅程" : "记录已暂停"}</h2>
+          <h2>
+            {suspension?.heading ??
+              (isRunning ? "正在记录你的数字旅程" : "记录已暂停")}
+          </h2>
           <p>
-            {isRunning
+            {suspension?.detail ??
+              (isRunning
               ? `预计 ${formatNextCapture(snapshot.nextCaptureAt)} 捕获当前主显示器。`
-              : `开启后 10 秒完成首次截图，随后每 ${snapshot.settings.intervalMinutes} 分钟记录一次。`}
+              : `开启后 10 秒完成首次截图，随后每 ${snapshot.settings.intervalMinutes} 分钟记录一次。`)}
           </p>
         </div>
         <div className="hero-card__actions">
@@ -176,7 +214,9 @@ export function TodayPage({
             className="button button--primary"
             disabled={loading}
             aria-busy={recordingPending && recordingTarget !== "stopped"}
-            onClick={() => onStateChange(isRunning ? "paused" : "running")}
+            onClick={() =>
+              onStateChange(isRecordingRequested ? "paused" : "running")
+            }
             type="button"
           >
             {recordingActionLabel(

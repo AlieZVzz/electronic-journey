@@ -1,6 +1,7 @@
 use std::{collections::HashSet, path::Path, time::Duration};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
+use serde::{Deserialize, Serialize};
 use sqlx::migrate::MigrateError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{FromRow, SqlitePool};
@@ -9,6 +10,16 @@ use uuid::Uuid;
 
 const MAX_TIMELINE_PAGE_SIZE: u16 = 50;
 const MAX_UPLOAD_BATCH_SIZE: usize = 500;
+const BEIJING_UTC_OFFSET_SECONDS: i32 = 8 * 60 * 60;
+
+fn remote_capture_path(capture_id: &Uuid, captured_at_utc: &DateTime<Utc>) -> String {
+    let beijing_offset =
+        FixedOffset::east_opt(BEIJING_UTC_OFFSET_SECONDS).expect("UTC+8 is a valid fixed offset");
+    let captured_at_beijing = captured_at_utc.with_timezone(&beijing_offset);
+    let date_path = captured_at_beijing.format("%Y/%m/%d");
+    let timestamp = captured_at_beijing.format("%Y%m%dT%H%M%S%3f%z");
+    format!("{date_path}/{timestamp}_{capture_id}.webp")
+}
 
 #[derive(Debug, Error)]
 pub enum DatabaseError {
@@ -26,6 +37,8 @@ pub enum DatabaseError {
     InvalidUploadSelection,
     #[error("another upload batch is already active")]
     UploadAlreadyInProgress,
+    #[error("database contains invalid JSON settings: {0}")]
+    InvalidSettingsJson(#[from] serde_json::Error),
 }
 
 pub async fn connect(path: &Path) -> Result<SqlitePool, DatabaseError> {
@@ -44,6 +57,47 @@ pub async fn connect(path: &Path) -> Result<SqlitePool, DatabaseError> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     recover_interrupted_uploads(&pool).await?;
     Ok(pool)
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSettingsRecord {
+    pub interval_minutes: u16,
+    pub idle_pause_minutes: u16,
+}
+
+pub async fn capture_settings(
+    pool: &SqlitePool,
+) -> Result<Option<CaptureSettingsRecord>, DatabaseError> {
+    let value_json: Option<String> =
+        sqlx::query_scalar("SELECT value_json FROM settings WHERE key = 'capture'")
+            .fetch_optional(pool)
+            .await?;
+    value_json
+        .map(|value| serde_json::from_str(&value).map_err(Into::into))
+        .transpose()
+}
+
+pub async fn save_capture_settings(
+    pool: &SqlitePool,
+    settings: &CaptureSettingsRecord,
+) -> Result<(), DatabaseError> {
+    let value_json = serde_json::to_string(settings)?;
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query(
+        r#"
+        INSERT INTO settings (key, value_json, updated_at_utc)
+        VALUES ('capture', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value_json = excluded.value_json,
+            updated_at_utc = excluded.updated_at_utc
+        "#,
+    )
+    .bind(value_json)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn recover_interrupted_uploads(pool: &SqlitePool) -> Result<(), DatabaseError> {
@@ -105,6 +159,8 @@ pub struct NewCaptureRecord<'a> {
     pub file_size: u64,
     pub content_sha256: &'a str,
     pub pixel_sha256: Option<&'a str>,
+    pub stable_content_sha256: Option<&'a str>,
+    pub comparison_policy: Option<&'a str>,
     pub thumbnail_state: &'a str,
 }
 
@@ -130,10 +186,12 @@ pub async fn insert_capture(
             file_size,
             content_sha256,
             pixel_sha256,
+            stable_content_sha256,
+            comparison_policy,
             thumbnail_state,
             created_at_utc
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(capture.id.to_string())
@@ -146,6 +204,8 @@ pub async fn insert_capture(
     .bind(file_size)
     .bind(capture.content_sha256)
     .bind(capture.pixel_sha256)
+    .bind(capture.stable_content_sha256)
+    .bind(capture.comparison_policy)
     .bind(capture.thumbnail_state)
     .bind(&timestamp)
     .execute(&mut *transaction)
@@ -175,10 +235,12 @@ pub async fn insert_capture_if_missing(
             file_size,
             content_sha256,
             pixel_sha256,
+            stable_content_sha256,
+            comparison_policy,
             thumbnail_state,
             created_at_utc
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(capture.id.to_string())
@@ -191,6 +253,8 @@ pub async fn insert_capture_if_missing(
     .bind(file_size)
     .bind(capture.content_sha256)
     .bind(capture.pixel_sha256)
+    .bind(capture.stable_content_sha256)
+    .bind(capture.comparison_policy)
     .bind(capture.thumbnail_state)
     .bind(&timestamp)
     .execute(pool)
@@ -205,14 +269,14 @@ pub async fn capture_ids(pool: &SqlitePool) -> Result<HashSet<String>, DatabaseE
     Ok(ids.into_iter().collect())
 }
 
-pub async fn latest_capture_pixel_sha256(
+pub async fn latest_capture_fingerprints(
     pool: &SqlitePool,
     device_id: &str,
     display_id: &str,
-) -> Result<Option<Option<String>>, DatabaseError> {
-    sqlx::query_scalar(
+) -> Result<Option<(Option<String>, Option<String>)>, DatabaseError> {
+    sqlx::query_as(
         r#"
-        SELECT pixel_sha256
+        SELECT pixel_sha256, stable_content_sha256
         FROM captures
         WHERE device_id = ? AND display_id = ?
         ORDER BY captured_at_utc DESC, id DESC
@@ -254,6 +318,32 @@ pub struct CaptureSummary {
 pub struct CaptureSummaryPage {
     pub items: Vec<CaptureSummary>,
     pub next_offset: Option<u32>,
+}
+
+pub async fn capture_selection_between(
+    pool: &SqlitePool,
+    start_utc: DateTime<Utc>,
+    end_utc: DateTime<Utc>,
+) -> Result<Vec<(String, u64)>, DatabaseError> {
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT id, file_size
+        FROM captures
+        WHERE captured_at_utc >= ? AND captured_at_utc < ?
+        ORDER BY captured_at_utc DESC, id DESC
+        "#,
+    )
+    .bind(start_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    .bind(end_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|(id, file_size)| {
+            u64::try_from(file_size)
+                .map(|file_size| (id, file_size))
+                .map_err(|_| DatabaseError::InvalidFileSize)
+        })
+        .collect()
 }
 
 pub async fn list_capture_summaries(
@@ -718,9 +808,7 @@ pub async fn create_upload_batch(
     .await?;
 
     for (capture_id, captured_at_utc, file_size, content_sha256) in captures {
-        let date_path = captured_at_utc.format("%Y/%m/%d");
-        let timestamp = captured_at_utc.format("%Y%m%dT%H%M%S%3fZ");
-        let remote_path = format!("{date_path}/{timestamp}_{capture_id}.webp");
+        let remote_path = remote_capture_path(capture_id, &captured_at_utc);
         sqlx::query(
             r#"
             INSERT INTO upload_items (
@@ -998,6 +1086,8 @@ mod tests {
             file_size: 10,
             content_sha256: "abc",
             pixel_sha256: Some("pixels"),
+            stable_content_sha256: Some("stable"),
+            comparison_policy: Some(crate::image_fingerprint::COMPARISON_POLICY),
             thumbnail_state: "pending",
         }
     }
@@ -1056,6 +1146,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn day_selection_includes_items_outside_the_loaded_page() {
+        let pool = migrated_memory_pool().await;
+        let start = DateTime::parse_from_rfc3339("2026-07-29T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut before = record(Uuid::new_v4(), start - chrono::Duration::seconds(1));
+        let mut first = record(Uuid::new_v4(), start + chrono::Duration::hours(1));
+        let mut second = record(Uuid::new_v4(), start + chrono::Duration::hours(23));
+        before.local_path = "captures/before-day.webp";
+        first.local_path = "captures/day-first.webp";
+        second.local_path = "captures/day-second.webp";
+        insert_capture(&pool, &before).await.unwrap();
+        insert_capture(&pool, &first).await.unwrap();
+        insert_capture(&pool, &second).await.unwrap();
+
+        let selected = capture_selection_between(&pool, start, start + chrono::Duration::days(1))
+            .await
+            .unwrap();
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].0, second.id.to_string());
+        assert_eq!(selected[1].0, first.id.to_string());
+    }
+
+    #[tokio::test]
     async fn latest_pixel_fingerprint_is_scoped_to_the_display() {
         let pool = migrated_memory_pool().await;
         let captured_at = DateTime::parse_from_rfc3339("2026-07-29T02:00:00Z")
@@ -1075,19 +1190,19 @@ mod tests {
         insert_capture(&pool, &second).await.unwrap();
 
         assert_eq!(
-            latest_capture_pixel_sha256(&pool, "local", "display")
+            latest_capture_fingerprints(&pool, "local", "display")
                 .await
                 .unwrap(),
-            Some(Some("first-pixels".into()))
+            Some((Some("first-pixels".into()), Some("stable".into())))
         );
         assert_eq!(
-            latest_capture_pixel_sha256(&pool, "local", "second-display")
+            latest_capture_fingerprints(&pool, "local", "second-display")
                 .await
                 .unwrap(),
-            Some(Some("second-pixels".into()))
+            Some((Some("second-pixels".into()), Some("stable".into())))
         );
         assert_eq!(
-            latest_capture_pixel_sha256(&pool, "local", "missing-display")
+            latest_capture_fingerprints(&pool, "local", "missing-display")
                 .await
                 .unwrap(),
             None
@@ -1108,6 +1223,8 @@ mod tests {
         assert!(!columns.contains(&"key_version".to_string()));
         assert!(!columns.contains(&"storage_format".to_string()));
         assert!(columns.contains(&"pixel_sha256".to_string()));
+        assert!(columns.contains(&"stable_content_sha256".to_string()));
+        assert!(columns.contains(&"comparison_policy".to_string()));
 
         let upload_tables: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE '%upload%'",
@@ -1123,6 +1240,76 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(ai_tables.0, 0);
+    }
+
+    #[tokio::test]
+    async fn stable_fingerprint_migration_preserves_existing_captures() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for migration in [
+            include_str!("../../migrations/0001_local_images_and_ai_jobs.sql"),
+            include_str!("../../migrations/0002_personal_sftp_uploads.sql"),
+            include_str!("../../migrations/0003_single_active_upload.sql"),
+            include_str!("../../migrations/0004_capture_pixel_fingerprints.sql"),
+            include_str!("../../migrations/0005_opt_in_auto_sync.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO captures (
+                id, device_id, display_id, captured_at_utc, timezone,
+                local_path, thumbnail_path, file_size, content_sha256,
+                thumbnail_state, favorite, created_at_utc, pixel_sha256
+            )
+            VALUES (
+                'existing', 'local', 'display', '2026-07-29T00:00:00.000Z',
+                'Asia/Singapore', 'captures/existing.webp', NULL, 10,
+                'container', 'pending', 0, '2026-07-29T00:00:00.000Z', 'pixels'
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0006_stable_content_fingerprints.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT pixel_sha256, stable_content_sha256, comparison_policy FROM captures",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row, ("pixels".into(), None, None));
+    }
+
+    #[tokio::test]
+    async fn capture_settings_are_persisted_and_updated() {
+        let pool = migrated_memory_pool().await;
+        assert_eq!(capture_settings(&pool).await.unwrap(), None);
+
+        let initial = CaptureSettingsRecord {
+            interval_minutes: 15,
+            idle_pause_minutes: 30,
+        };
+        save_capture_settings(&pool, &initial).await.unwrap();
+        assert_eq!(capture_settings(&pool).await.unwrap(), Some(initial));
+
+        let updated = CaptureSettingsRecord {
+            interval_minutes: 60,
+            idle_pause_minutes: 0,
+        };
+        save_capture_settings(&pool, &updated).await.unwrap();
+        assert_eq!(capture_settings(&pool).await.unwrap(), Some(updated));
     }
 
     #[tokio::test]
@@ -1249,10 +1436,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_batch_has_stable_date_paths_and_rejects_duplicates() {
+    async fn upload_batch_uses_beijing_time_across_date_boundary_and_rejects_duplicates() {
         let pool = migrated_memory_pool().await;
         let capture_id = Uuid::new_v4();
-        let captured_at = DateTime::parse_from_rfc3339("2026-07-29T02:03:04.567Z")
+        let captured_at = DateTime::parse_from_rfc3339("2026-07-29T18:03:04.567Z")
             .unwrap()
             .with_timezone(&Utc);
         insert_capture(&pool, &record(capture_id, captured_at))
@@ -1281,7 +1468,7 @@ mod tests {
         let item = upload_batch_items(&pool, batch.id).await.unwrap().remove(0);
         assert_eq!(
             item.remote_path,
-            format!("2026/07/29/20260729T020304567Z_{capture_id}.webp")
+            format!("2026/07/30/20260730T020304567+0800_{capture_id}.webp")
         );
         assert!(matches!(
             create_upload_batch(&pool, "primary", &[capture_id, capture_id], "manual",).await,

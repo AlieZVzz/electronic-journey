@@ -348,13 +348,18 @@ export function StoragePage() {
               value={profile.privateKeyPath}
             />
             <button
-              className="button button--ghost"
+              className="button button--file-picker"
               aria-busy={pickingKey}
               disabled={operationBusy}
               onClick={() => void pickPrivateKey()}
               type="button"
             >
-              {pickingKey ? "正在选择…" : "选择文件…"}
+              {!pickingKey && (
+                <svg aria-hidden="true" viewBox="0 0 20 20">
+                  <path d="M2.75 5.75A1.75 1.75 0 0 1 4.5 4h3.05l1.5 1.75h6.45a1.75 1.75 0 0 1 1.75 1.75v6.75A1.75 1.75 0 0 1 15.5 16h-11a1.75 1.75 0 0 1-1.75-1.75v-8.5Z" />
+                </svg>
+              )}
+              {pickingKey ? "正在选择…" : "选择文件"}
             </button>
           </span>
         </label>
@@ -440,19 +445,21 @@ export function StoragePage() {
             自动同步间隔
             <small>从保存配置或上次同步开始计算</small>
           </span>
-          <select
-            disabled={operationBusy || !profile.autoSyncEnabled}
-            onChange={(event) =>
-              update("syncIntervalMinutes", Number(event.target.value))
-            }
-            value={profile.syncIntervalMinutes}
-          >
-            {syncIntervals.map((minutes) => (
-              <option key={minutes} value={minutes}>
-                每 {minutes} 分钟
-              </option>
-            ))}
-          </select>
+          <span className="select-control">
+            <select
+              disabled={operationBusy || !profile.autoSyncEnabled}
+              onChange={(event) =>
+                update("syncIntervalMinutes", Number(event.target.value))
+              }
+              value={profile.syncIntervalMinutes}
+            >
+              {syncIntervals.map((minutes) => (
+                <option key={minutes} value={minutes}>
+                  每 {minutes} 分钟
+                </option>
+              ))}
+            </select>
+          </span>
         </label>
         {profile.autoSyncEnabled && (
           <div className="auto-sync-disclosure" role="note">

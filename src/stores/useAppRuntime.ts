@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { desktopApi } from "../api/desktop";
 import {
@@ -77,6 +78,44 @@ export function useAppRuntime(): AppRuntime {
     if (!desktopApi.isDesktopRuntime()) {
       return;
     }
+    let active = true;
+    let unlisten: UnlistenFn | undefined;
+    const refreshSnapshot = () => {
+      desktopApi
+        .getSnapshot()
+        .then((value) => {
+          if (active) {
+            setSnapshot(value);
+            setError(null);
+          }
+        })
+        .catch((reason: unknown) => {
+          if (active) {
+            setError(String(reason));
+          }
+        });
+    };
+
+    void listen("runtime-state-changed", refreshSnapshot).then(
+      (stopListening) => {
+        if (active) {
+          unlisten = stopListening;
+        } else {
+          stopListening();
+        }
+      },
+    );
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!desktopApi.isDesktopRuntime()) {
+      return;
+    }
 
     const refreshPermission = () => {
       desktopApi
@@ -126,7 +165,10 @@ export function useAppRuntime(): AppRuntime {
   }, []);
 
   useEffect(() => {
-    if (!desktopApi.isDesktopRuntime() || snapshot?.state !== "running") {
+    if (
+      !desktopApi.isDesktopRuntime() ||
+      !["running", "suspended"].includes(snapshot?.state ?? "")
+    ) {
       return;
     }
 
@@ -144,7 +186,10 @@ export function useAppRuntime(): AppRuntime {
   }, [snapshot?.state]);
 
   useEffect(() => {
-    if (!desktopApi.isDesktopRuntime() || snapshot?.state === "running") {
+    if (
+      !desktopApi.isDesktopRuntime() ||
+      ["running", "suspended"].includes(snapshot?.state ?? "")
+    ) {
       return;
     }
     const timer = window.setInterval(() => {

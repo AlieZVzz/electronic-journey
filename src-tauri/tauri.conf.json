@@ -36,6 +36,13 @@
     "active": true,
     "targets": "all",
     "category": "Productivity",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "shortDescription": "Your local digital journey archive",
     "longDescription": "A local-first desktop application that captures and organizes your own digital journey."
   }

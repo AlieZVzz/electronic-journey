@@ -1,7 +1,14 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use core_graphics::{access::ScreenCaptureAccess, display::CGDisplay};
+use objc2_app_kit::NSScreen;
+use objc2_foundation::MainThreadMarker;
+use tauri::AppHandle;
 
-use super::{CaptureError, CapturedImage, DisplayId, DisplayInfo, PermissionState, ScreenCapture};
+use super::{
+    CaptureError, CapturedImage, DisplayId, DisplayInfo, PermissionState, PixelRect, ScreenCapture,
+};
 
 /// macOS capture adapter boundary.
 ///
@@ -92,13 +99,109 @@ impl ScreenCapture for PlatformCapture {
             width,
             height,
             rgba,
+            comparison_exclusions: None,
         })
     }
+
+    async fn comparison_exclusions(
+        &self,
+        app: &AppHandle,
+        display_id: &DisplayId,
+        capture_width: u32,
+        capture_height: u32,
+    ) -> Option<Vec<PixelRect>> {
+        let native_id = display_id.0.parse::<u32>().ok()?;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let exclusions = menu_bar_exclusions(native_id, capture_width, capture_height);
+            let _ = sender.send(exclusions);
+        })
+        .ok()?;
+        tokio::time::timeout(Duration::from_secs(2), receiver)
+            .await
+            .ok()?
+            .ok()
+            .flatten()
+    }
+}
+
+fn menu_bar_exclusions(
+    display_id: u32,
+    capture_width: u32,
+    capture_height: u32,
+) -> Option<Vec<PixelRect>> {
+    let main_thread = MainThreadMarker::new()?;
+    let screens = NSScreen::screens(main_thread);
+    let screen = screens
+        .iter()
+        .find(|screen| screen.CGDirectDisplayID() == display_id)?;
+    let frame = screen.frame();
+    let visible = screen.visibleFrame();
+    if frame.size.width <= 0.0 || frame.size.height <= 0.0 {
+        return None;
+    }
+
+    let frame_top = frame.origin.y + frame.size.height;
+    let visible_top = visible.origin.y + visible.size.height;
+    let top_gap_points = frame_top - visible_top;
+    top_edge_exclusion(
+        frame.size.height,
+        top_gap_points,
+        capture_width,
+        capture_height,
+    )
+}
+
+fn top_edge_exclusion(
+    frame_height_points: f64,
+    top_gap_points: f64,
+    capture_width: u32,
+    capture_height: u32,
+) -> Option<Vec<PixelRect>> {
+    if !frame_height_points.is_finite()
+        || !top_gap_points.is_finite()
+        || frame_height_points <= 0.0
+        || top_gap_points < 0.0
+        || capture_width == 0
+        || capture_height == 0
+    {
+        return None;
+    }
+    let top_gap_pixels =
+        (top_gap_points * f64::from(capture_height) / frame_height_points).round() as u32;
+    if top_gap_pixels > (capture_height / 10).max(1) {
+        return None;
+    }
+
+    let mut exclusions = Vec::with_capacity(1);
+    if top_gap_pixels > 0 {
+        exclusions.push(PixelRect {
+            x: 0,
+            y: 0,
+            width: capture_width,
+            height: top_gap_pixels,
+        });
+    }
+    Some(exclusions)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_bar_points_scale_to_capture_pixels() {
+        assert_eq!(
+            top_edge_exclusion(900.0, 24.0, 2880, 1800),
+            Some(vec![PixelRect {
+                x: 0,
+                y: 0,
+                width: 2880,
+                height: 48,
+            }])
+        );
+        assert!(top_edge_exclusion(900.0, 100.0, 1440, 900).is_none());
+    }
 
     #[tokio::test]
     #[ignore = "requires an interactive macOS session with Screen Recording permission"]

@@ -1,16 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
   <defs>
     <linearGradient id="background" x1="130" y1="110" x2="860" y2="910" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#42614C"/>
-      <stop offset="0.52" stop-color="#294436"/>
-      <stop offset="1" stop-color="#1E3429"/>
+      <stop offset="0" stop-color="#4F7CFF"/>
+      <stop offset="0.52" stop-color="#3158D4"/>
+      <stop offset="1" stop-color="#16265C"/>
     </linearGradient>
     <linearGradient id="route" x1="350" y1="288" x2="700" y2="732" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#FFFDF6"/>
       <stop offset="1" stop-color="#E8E1D2"/>
     </linearGradient>
     <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="150%">
-      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#14251C" flood-opacity="0.32"/>
+      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#0A1538" flood-opacity="0.36"/>
     </filter>
   </defs>
 
@@ -20,8 +20,8 @@
   <path
     d="M512 170C612 218 696 244 770 254V468C770 650 666 784 512 858C358 784 254 650 254 468V254C328 244 412 218 512 170Z"
     fill="none"
-    stroke="#AFC0B1"
-    stroke-opacity="0.34"
+    stroke="#B9D0FF"
+    stroke-opacity="0.38"
     stroke-width="24"
     stroke-linejoin="round"
   />

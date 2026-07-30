@@ -73,8 +73,16 @@ pub async fn persist_capture(
     captured_at_utc: DateTime<Utc>,
     timezone: &str,
 ) -> Result<PersistCaptureOutcome, CapturePipelineError> {
-    let (image, pixel_sha256) = prepare_capture(captured)?;
-    if should_skip_duplicate(pool, "local", display_id, &pixel_sha256).await? {
+    let (image, fingerprints) = prepare_capture(captured)?;
+    if should_skip_duplicate(
+        pool,
+        "local",
+        display_id,
+        &fingerprints.pixel_sha256,
+        fingerprints.stable_content_sha256.as_deref(),
+    )
+    .await?
+    {
         return Ok(PersistCaptureOutcome::SkippedDuplicate);
     }
     let (original, thumbnail) = encode_webp_variants(&image)?;
@@ -128,7 +136,12 @@ pub async fn persist_capture(
             thumbnail_path: stored_thumbnail_path,
             file_size: original.len() as u64,
             content_sha256: &content_sha256,
-            pixel_sha256: Some(&pixel_sha256),
+            pixel_sha256: Some(&fingerprints.pixel_sha256),
+            stable_content_sha256: fingerprints.stable_content_sha256.as_deref(),
+            comparison_policy: fingerprints
+                .stable_content_sha256
+                .as_ref()
+                .map(|_| image_fingerprint::COMPARISON_POLICY),
             thumbnail_state,
         },
     )
@@ -145,11 +158,18 @@ async fn should_skip_duplicate(
     device_id: &str,
     display_id: &str,
     pixel_sha256: &str,
+    stable_content_sha256: Option<&str>,
 ) -> Result<bool, CapturePipelineError> {
-    let latest = database::latest_capture_pixel_sha256(pool, device_id, display_id)
+    let latest = database::latest_capture_fingerprints(pool, device_id, display_id)
         .await
         .map_err(|_| CapturePipelineError::Database)?;
-    Ok(matches!(latest, Some(Some(latest)) if latest == pixel_sha256))
+    Ok(match latest {
+        Some((_, Some(latest_stable))) if stable_content_sha256.is_some() => {
+            stable_content_sha256 == Some(latest_stable.as_str())
+        }
+        Some((Some(latest_pixel), _)) => latest_pixel == pixel_sha256,
+        _ => false,
+    })
 }
 
 pub fn read_saved_capture(
@@ -484,14 +504,18 @@ fn inventory_directory(
 
 fn prepare_capture(
     captured: CapturedImage,
-) -> Result<(DynamicImage, String), CapturePipelineError> {
+) -> Result<(DynamicImage, image_fingerprint::PixelFingerprints), CapturePipelineError> {
     let mut rgba = captured.rgba;
-    let pixel_sha256 =
-        image_fingerprint::normalize_alpha_and_hash(captured.width, captured.height, &mut rgba)
-            .ok_or(CapturePipelineError::InvalidPixels)?;
+    let fingerprints = image_fingerprint::normalize_alpha_and_fingerprint(
+        captured.width,
+        captured.height,
+        &mut rgba,
+        captured.comparison_exclusions.as_deref(),
+    )
+    .ok_or(CapturePipelineError::InvalidPixels)?;
     let image = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(captured.width, captured.height, rgba)
         .ok_or(CapturePipelineError::InvalidPixels)?;
-    Ok((DynamicImage::ImageRgba8(image), pixel_sha256))
+    Ok((DynamicImage::ImageRgba8(image), fingerprints))
 }
 
 fn encode_webp_variants(
@@ -542,6 +566,7 @@ mod tests {
             width,
             height,
             rgba: vec![255; width as usize * height as usize * 4],
+            comparison_exclusions: Some(Vec::new()),
         }
     }
 
@@ -567,6 +592,7 @@ mod tests {
             width: 2,
             height: 2,
             rgba: vec![0; 15],
+            comparison_exclusions: Some(Vec::new()),
         };
 
         assert!(matches!(
@@ -576,7 +602,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_detection_uses_only_the_latest_capture_on_the_same_display() {
+    async fn duplicate_detection_prefers_stable_content_and_falls_back_to_exact_pixels() {
         let pool = migrated_memory_pool().await;
         let capture_id = Uuid::new_v4();
         database::insert_capture(
@@ -592,24 +618,48 @@ mod tests {
                 file_size: 10,
                 content_sha256: "container",
                 pixel_sha256: Some("exact-pixels"),
+                stable_content_sha256: Some("stable-content"),
+                comparison_policy: Some(image_fingerprint::COMPARISON_POLICY),
                 thumbnail_state: "pending",
             },
         )
         .await
         .unwrap();
 
+        assert!(should_skip_duplicate(
+            &pool,
+            "local",
+            "primary",
+            "changed-exact-pixels",
+            Some("stable-content")
+        )
+        .await
+        .unwrap());
+        assert!(!should_skip_duplicate(
+            &pool,
+            "local",
+            "primary",
+            "exact-pixels",
+            Some("changed-stable-content")
+        )
+        .await
+        .unwrap());
+        assert!(!should_skip_duplicate(
+            &pool,
+            "local",
+            "secondary",
+            "exact-pixels",
+            Some("stable-content")
+        )
+        .await
+        .unwrap());
         assert!(
-            should_skip_duplicate(&pool, "local", "primary", "exact-pixels")
+            should_skip_duplicate(&pool, "local", "primary", "exact-pixels", None)
                 .await
                 .unwrap()
         );
         assert!(
-            !should_skip_duplicate(&pool, "local", "primary", "changed-pixels")
-                .await
-                .unwrap()
-        );
-        assert!(
-            !should_skip_duplicate(&pool, "local", "secondary", "exact-pixels")
+            !should_skip_duplicate(&pool, "local", "primary", "changed-exact-pixels", None)
                 .await
                 .unwrap()
         );
@@ -621,6 +671,7 @@ mod tests {
             width: 4,
             height: 2,
             rgba: vec![255; 4 * 2 * 4],
+            comparison_exclusions: Some(Vec::new()),
         };
         let (image, _) = prepare_capture(captured).unwrap();
         let (encoded, thumbnail) = encode_webp_variants(&image).unwrap();
@@ -641,6 +692,7 @@ mod tests {
             width: 2,
             height: 1,
             rgba: vec![12, 34, 56, 0, 78, 90, 123, 128],
+            comparison_exclusions: Some(Vec::new()),
         };
         let (image, _) = prepare_capture(captured).unwrap();
         let (encoded, thumbnail) = encode_webp_variants(&image).unwrap();

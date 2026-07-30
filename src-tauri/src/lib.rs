@@ -7,7 +7,9 @@ mod error;
 mod image_fingerprint;
 mod privacy;
 mod scheduler;
+mod system_monitor;
 mod timeline;
+mod tray;
 mod upload;
 mod vault;
 
@@ -72,7 +74,27 @@ pub fn run() {
             let pool = tauri::async_runtime::block_on(database::connect(
                 &data_dir.join("electronic-journey.sqlite3"),
             ))?;
+            let stored_capture_settings =
+                tauri::async_runtime::block_on(database::capture_settings(&pool));
             app.manage(pool);
+            let runtime = app.state::<RuntimeState>();
+            match stored_capture_settings {
+                Ok(Some(settings)) => {
+                    if runtime
+                        .restore_settings(commands::CaptureSettings {
+                            interval_minutes: settings.interval_minutes,
+                            idle_pause_minutes: settings.idle_pause_minutes,
+                        })
+                        .is_err()
+                    {
+                        runtime.set_settings_recovery_error();
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => runtime.set_settings_recovery_error(),
+            }
+            tray::install(app.handle())?;
+            system_monitor::start(app.handle());
             auto_sync::spawn_scheduler(app.handle().clone());
             trace_startup("database ready");
             Ok(())
@@ -85,12 +107,21 @@ pub fn run() {
                 spawn_startup_recovery(webview.app_handle().clone());
             }
         })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_snapshot,
             commands::get_active_upload_batch,
             commands::get_remote_profile,
             commands::get_upload_batch_status,
             commands::delete_timeline_capture,
+            commands::list_timeline_day_selection,
             commands::list_timeline_captures,
             commands::pick_private_key_file,
             commands::read_timeline_capture,

@@ -6,6 +6,7 @@ import type {
   CaptureSettings,
   RecordingState,
   TimelinePageResult,
+  TimelineSelectionItem,
   RemoteConnectionTest,
   RemoteProfile,
   SaveRemoteProfileInput,
@@ -20,6 +21,7 @@ declare global {
 
 const browserSnapshot: AppSnapshot = {
   state: "stopped",
+  suspensionReason: null,
   nextCaptureAt: null,
   todayCount: 0,
   localStorageBytes: 0,
@@ -74,6 +76,7 @@ export const desktopApi = {
   async setRecordingState(state: RecordingState): Promise<AppSnapshot> {
     if (!isTauriRuntime()) {
       browserSnapshot.state = state;
+      browserSnapshot.suspensionReason = null;
       browserSnapshot.nextCaptureAt =
         state === "running"
           ? new Date(Date.now() + 10 * 1000).toISOString()
@@ -118,6 +121,19 @@ export const desktopApi = {
       offset,
       limit,
     });
+  },
+
+  async listTimelineDaySelection(
+    dateKey: string,
+  ): Promise<TimelineSelectionItem[]> {
+    if (!isTauriRuntime()) {
+      return [];
+    }
+
+    return invoke<TimelineSelectionItem[]>(
+      "list_timeline_day_selection",
+      { dateKey },
+    );
   },
 
   async readTimelineCapture(captureId: string): Promise<ArrayBuffer> {

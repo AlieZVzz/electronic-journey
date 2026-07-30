@@ -7,6 +7,11 @@ export type RecordingState =
 
 export type PermissionState = "not_determined" | "granted" | "denied";
 
+export type SuspensionReason =
+  | "screen_locked"
+  | "system_sleeping"
+  | "user_idle";
+
 export interface CaptureSettings {
   intervalMinutes: number;
   idlePauseMinutes: number;
@@ -14,6 +19,7 @@ export interface CaptureSettings {
 
 export interface AppSnapshot {
   state: RecordingState;
+  suspensionReason: SuspensionReason | null;
   nextCaptureAt: string | null;
   todayCount: number;
   localStorageBytes: number;
@@ -108,6 +114,11 @@ export interface UploadBatchProgress {
 export interface TimelinePageResult {
   items: TimelineCapture[];
   nextOffset: number | null;
+}
+
+export interface TimelineSelectionItem {
+  id: string;
+  fileSize: number;
 }
 
 export type PageId = "today" | "timeline" | "privacy" | "storage";

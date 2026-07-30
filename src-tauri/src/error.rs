@@ -10,4 +10,6 @@ pub enum AppError {
     InvalidSettings(String),
     #[error("screen recording permission is required before recording can start")]
     CapturePermissionRequired,
+    #[error("system activity monitoring is unavailable; restart the application before recording")]
+    SystemMonitorUnavailable,
 }

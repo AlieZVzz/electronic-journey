@@ -34,6 +34,13 @@ pub struct TimelinePage {
     pub next_offset: Option<u32>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineSelectionItem {
+    pub id: String,
+    pub file_size: u64,
+}
+
 #[derive(Debug, Error)]
 pub enum TimelineError {
     #[error("application data directory is unavailable")]
@@ -63,6 +70,20 @@ pub async fn list_captures(
             .collect(),
         next_offset: page.next_offset,
     })
+}
+
+pub async fn list_selection_between(
+    pool: &SqlitePool,
+    start_utc: DateTime<Utc>,
+    end_utc: DateTime<Utc>,
+) -> Result<Vec<TimelineSelectionItem>, TimelineError> {
+    Ok(
+        database::capture_selection_between(pool, start_utc, end_utc)
+            .await?
+            .into_iter()
+            .map(|(id, file_size)| TimelineSelectionItem { id, file_size })
+            .collect(),
+    )
 }
 
 pub async fn reconcile_capture_index(
@@ -212,6 +233,8 @@ async fn index_capture_path(
             file_size: metadata.len(),
             content_sha256: &content_sha256,
             pixel_sha256: Some(&pixel_sha256),
+            stable_content_sha256: None,
+            comparison_policy: None,
             thumbnail_state: if thumbnail_path.is_some() {
                 "ready"
             } else {
