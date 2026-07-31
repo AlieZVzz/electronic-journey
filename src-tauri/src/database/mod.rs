@@ -269,6 +269,49 @@ pub async fn capture_ids(pool: &SqlitePool) -> Result<HashSet<String>, DatabaseE
     Ok(ids.into_iter().collect())
 }
 
+#[derive(Debug, FromRow)]
+struct CaptureInventoryRow {
+    id: String,
+    captured_at_utc: DateTime<Utc>,
+    local_path: String,
+    thumbnail_path: Option<String>,
+    file_size: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CaptureInventoryRecord {
+    pub id: String,
+    pub captured_at_utc: DateTime<Utc>,
+    pub local_path: String,
+    pub thumbnail_path: Option<String>,
+    pub file_size: u64,
+}
+
+pub async fn capture_inventory_records(
+    pool: &SqlitePool,
+) -> Result<Vec<CaptureInventoryRecord>, DatabaseError> {
+    sqlx::query_as::<_, CaptureInventoryRow>(
+        r#"
+        SELECT id, captured_at_utc, local_path, thumbnail_path, file_size
+        FROM captures
+        ORDER BY captured_at_utc DESC, id DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|row| {
+        Ok(CaptureInventoryRecord {
+            id: row.id,
+            captured_at_utc: row.captured_at_utc,
+            local_path: row.local_path,
+            thumbnail_path: row.thumbnail_path,
+            file_size: u64::try_from(row.file_size).map_err(|_| DatabaseError::InvalidFileSize)?,
+        })
+    })
+    .collect()
+}
+
 pub async fn latest_capture_fingerprints(
     pool: &SqlitePool,
     device_id: &str,
@@ -398,7 +441,6 @@ struct CaptureFileRow {
     thumbnail_path: Option<String>,
     file_size: i64,
     content_sha256: String,
-    captured_at_utc: DateTime<Utc>,
 }
 
 pub struct CaptureFileRecord {
@@ -406,7 +448,6 @@ pub struct CaptureFileRecord {
     pub thumbnail_path: Option<String>,
     pub file_size: u64,
     pub content_sha256: String,
-    pub captured_at_utc: DateTime<Utc>,
 }
 
 pub async fn capture_file(
@@ -414,7 +455,7 @@ pub async fn capture_file(
     capture_id: Uuid,
 ) -> Result<Option<CaptureFileRecord>, DatabaseError> {
     let row = sqlx::query_as::<_, CaptureFileRow>(
-        "SELECT local_path, thumbnail_path, file_size, content_sha256, captured_at_utc FROM captures WHERE id = ?",
+        "SELECT local_path, thumbnail_path, file_size, content_sha256 FROM captures WHERE id = ?",
     )
     .bind(capture_id.to_string())
     .fetch_optional(pool)
@@ -425,7 +466,6 @@ pub async fn capture_file(
             thumbnail_path: row.thumbnail_path,
             file_size: u64::try_from(row.file_size).map_err(|_| DatabaseError::InvalidFileSize)?,
             content_sha256: row.content_sha256,
-            captured_at_utc: row.captured_at_utc,
         })
     })
     .transpose()
@@ -1143,6 +1183,29 @@ mod tests {
         let second = list_capture_summaries(&pool, 1, Some(1)).await.unwrap();
         assert_eq!(second.items[0].id, older_id.to_string());
         assert_eq!(second.next_offset, None);
+    }
+
+    #[tokio::test]
+    async fn inventory_records_come_from_sqlite_capture_metadata() {
+        let pool = migrated_memory_pool().await;
+        let capture_id = Uuid::new_v4();
+        let captured_at = DateTime::parse_from_rfc3339("2026-07-29T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut capture = record(capture_id, captured_at);
+        capture.local_path = "captures/2026/07/29/original.webp";
+        capture.thumbnail_path = Some("thumbnails/2026/07/29/original.webp");
+        capture.file_size = 42;
+        insert_capture(&pool, &capture).await.unwrap();
+
+        let records = capture_inventory_records(&pool).await.unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, capture_id.to_string());
+        assert_eq!(records[0].captured_at_utc, captured_at);
+        assert_eq!(records[0].local_path, capture.local_path);
+        assert_eq!(records[0].thumbnail_path.as_deref(), capture.thumbnail_path);
+        assert_eq!(records[0].file_size, 42);
     }
 
     #[tokio::test]

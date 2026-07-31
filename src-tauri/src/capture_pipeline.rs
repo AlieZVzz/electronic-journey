@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     capture::CapturedImage,
-    database::{self, CaptureFileRecord, NewCaptureRecord},
+    database::{self, CaptureFileRecord, CaptureInventoryRecord, NewCaptureRecord},
     image_fingerprint, vault,
 };
 
@@ -18,25 +18,14 @@ const MAXIMUM_CAPTURE_LENGTH: u64 = 128 * 1024 * 1024;
 const THUMBNAIL_MAX_WIDTH: u32 = 1440;
 
 #[derive(Debug)]
-pub struct StoredCapture {
-    pub storage_size: u64,
-}
-
-#[derive(Debug)]
 pub enum PersistCaptureOutcome {
-    Stored(StoredCapture),
+    Stored,
     SkippedDuplicate,
-}
-
-pub struct DeletedCapture {
-    pub storage_size: u64,
-    pub captured_at_utc: DateTime<Utc>,
 }
 
 struct StagedDeletion {
     original_path: PathBuf,
     staged_path: PathBuf,
-    size: u64,
 }
 
 #[derive(Debug, Error)]
@@ -101,13 +90,9 @@ pub async fn persist_capture(
     vault::write_atomic(&original_path, &original)
         .await
         .map_err(|_| CapturePipelineError::WriteFailed)?;
-    let (thumbnail_size, stored_thumbnail_path, thumbnail_state) =
+    let (stored_thumbnail_path, thumbnail_state) =
         match vault::write_atomic(&thumbnail_path, &thumbnail).await {
-            Ok(()) => (
-                thumbnail.len() as u64,
-                Some(thumbnail_relative.as_str()),
-                "ready",
-            ),
+            Ok(()) => (Some(thumbnail_relative.as_str()), "ready"),
             Err(_) => {
                 // The original is already durable and remains a valid capture.
                 // Timeline reads can derive a temporary thumbnail from it.
@@ -116,7 +101,7 @@ pub async fn persist_capture(
                     capture_id = %capture_id,
                     "thumbnail could not be persisted"
                 );
-                (0, None, "failed")
+                (None, "failed")
             }
         };
 
@@ -148,9 +133,7 @@ pub async fn persist_capture(
     .await
     .map_err(|_| CapturePipelineError::Database)?;
 
-    Ok(PersistCaptureOutcome::Stored(StoredCapture {
-        storage_size: original.len() as u64 + thumbnail_size,
-    }))
+    Ok(PersistCaptureOutcome::Stored)
 }
 
 async fn should_skip_duplicate(
@@ -224,7 +207,7 @@ pub async fn delete_saved_capture(
     pool: &SqlitePool,
     capture_id: Uuid,
     record: &CaptureFileRecord,
-) -> Result<DeletedCapture, CapturePipelineError> {
+) -> Result<(), CapturePipelineError> {
     let data_dir = app
         .path()
         .app_local_data_dir()
@@ -268,7 +251,6 @@ pub async fn delete_saved_capture(
         });
     }
 
-    let storage_size = staged.iter().map(|file| file.size).sum();
     remove_staged_files(&staged).await?;
     let record_absent = database::capture_file(pool, capture_id)
         .await
@@ -281,10 +263,7 @@ pub async fn delete_saved_capture(
         return Err(CapturePipelineError::DeleteIncomplete);
     }
 
-    Ok(DeletedCapture {
-        storage_size,
-        captured_at_utc: record.captured_at_utc,
-    })
+    Ok(())
 }
 
 async fn stage_file_for_deletion(
@@ -316,7 +295,6 @@ async fn stage_file_for_deletion(
     Ok(Some(StagedDeletion {
         original_path: path.to_path_buf(),
         staged_path,
-        size: metadata.len(),
     }))
 }
 
@@ -419,87 +397,93 @@ fn read_integrity_checked_webp(
     Ok(container)
 }
 
-pub fn capture_inventory(app: &AppHandle) -> Result<(u32, u64), CapturePipelineError> {
+pub async fn capture_inventory(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    today_start_utc: DateTime<Utc>,
+    tomorrow_start_utc: DateTime<Utc>,
+) -> Result<(u32, u64), CapturePipelineError> {
     let data_dir = app
         .path()
         .app_local_data_dir()
         .map_err(|_| CapturePipelineError::DataDirectory)?;
+    let records = database::capture_inventory_records(pool)
+        .await
+        .map_err(|_| CapturePipelineError::Database)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        verified_capture_inventory(&data_dir, &records, today_start_utc, tomorrow_start_utc)
+    })
+    .await
+    .map_err(|_| CapturePipelineError::ReadFailed)
+}
 
+fn verified_capture_inventory(
+    data_dir: &Path,
+    records: &[CaptureInventoryRecord],
+    today_start_utc: DateTime<Utc>,
+    tomorrow_start_utc: DateTime<Utc>,
+) -> (u32, u64) {
     let mut count = 0_u32;
     let mut bytes = 0_u64;
-    for (directory, extension, maximum_depth, count_as_capture) in [
-        (data_dir.join("captures"), "webp", 3, true),
-        (data_dir.join("thumbnails"), "webp", 3, false),
-    ] {
-        for path in inventory_files(&directory, extension, maximum_depth)? {
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                continue;
-            };
-            bytes = bytes.saturating_add(metadata.len());
-            if !count_as_capture {
-                continue;
-            }
-            let Some(_id) = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .and_then(|value| Uuid::parse_str(value).ok())
-            else {
-                continue;
-            };
-            if metadata
-                .modified()
-                .ok()
-                .map(DateTime::<Local>::from)
-                .is_some_and(|modified| modified.date_naive() == Local::now().date_naive())
+    for record in records {
+        let Ok(capture_id) = Uuid::parse_str(&record.id) else {
+            continue;
+        };
+        let original_size = verified_managed_file_size(
+            data_dir,
+            &record.local_path,
+            capture_id,
+            &["captures"],
+            Some(record.file_size),
+        );
+        if let Some(original_size) = original_size {
+            bytes = bytes.saturating_add(original_size);
+            if record.captured_at_utc >= today_start_utc
+                && record.captured_at_utc < tomorrow_start_utc
             {
                 count = count.saturating_add(1);
             }
         }
-    }
-    Ok((count, bytes))
-}
-
-fn inventory_files(
-    directory: &Path,
-    extension: &str,
-    maximum_depth: usize,
-) -> Result<Vec<PathBuf>, CapturePipelineError> {
-    let mut paths = Vec::new();
-    inventory_directory(directory, extension, maximum_depth, 0, &mut paths)?;
-    Ok(paths)
-}
-
-fn inventory_directory(
-    directory: &Path,
-    extension: &str,
-    maximum_depth: usize,
-    current_depth: usize,
-    paths: &mut Vec<PathBuf>,
-) -> Result<(), CapturePipelineError> {
-    let entries = match std::fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(CapturePipelineError::ReadFailed),
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            if current_depth < maximum_depth {
-                inventory_directory(&path, extension, maximum_depth, current_depth + 1, paths)?;
+        if let Some(thumbnail_path) = record.thumbnail_path.as_deref() {
+            if let Some(thumbnail_size) = verified_managed_file_size(
+                data_dir,
+                thumbnail_path,
+                capture_id,
+                &["thumbnails"],
+                None,
+            ) {
+                bytes = bytes.saturating_add(thumbnail_size);
             }
-        } else if metadata.is_file()
-            && path.extension().and_then(|value| value.to_str()) == Some(extension)
-        {
-            paths.push(path);
         }
     }
-    Ok(())
+    (count, bytes)
+}
+
+fn verified_managed_file_size(
+    data_dir: &Path,
+    relative_path: &str,
+    capture_id: Uuid,
+    allowed_prefixes: &[&str],
+    expected_size: Option<u64>,
+) -> Option<u64> {
+    let path = resolve_capture_path(
+        data_dir,
+        relative_path,
+        capture_id,
+        "webp",
+        allowed_prefixes,
+    )
+    .ok()?;
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    let size = metadata.len();
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || size > MAXIMUM_CAPTURE_LENGTH
+        || expected_size.is_some_and(|expected| expected != size)
+    {
+        return None;
+    }
+    Some(size)
 }
 
 fn prepare_capture(
@@ -584,6 +568,22 @@ mod tests {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         pool
+    }
+
+    fn inventory_record(
+        id: Uuid,
+        captured_at_utc: DateTime<Utc>,
+        local_path: String,
+        thumbnail_path: Option<String>,
+        file_size: u64,
+    ) -> CaptureInventoryRecord {
+        CaptureInventoryRecord {
+            id: id.to_string(),
+            captured_at_utc,
+            local_path,
+            thumbnail_path,
+            file_size,
+        }
     }
 
     #[test]
@@ -782,6 +782,107 @@ mod tests {
             &["captures"],
         )
         .is_err());
+    }
+
+    #[test]
+    fn inventory_uses_sqlite_time_and_only_verified_managed_files() {
+        let directory = temporary_test_directory();
+        let captures = directory.join("captures/2026/07/29");
+        let thumbnails = directory.join("thumbnails/2026/07/29");
+        std::fs::create_dir_all(&captures).unwrap();
+        std::fs::create_dir_all(&thumbnails).unwrap();
+        let today_start = DateTime::parse_from_rfc3339("2026-07-29T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let tomorrow_start = today_start + chrono::Duration::days(1);
+
+        let current_id = Uuid::new_v4();
+        let current_relative = format!("captures/2026/07/29/{current_id}.webp");
+        let current_thumbnail = format!("thumbnails/2026/07/29/{current_id}.webp");
+        std::fs::write(directory.join(&current_relative), b"current").unwrap();
+        std::fs::write(directory.join(&current_thumbnail), b"thumb").unwrap();
+
+        let previous_id = Uuid::new_v4();
+        let previous_relative = format!("captures/2026/07/29/{previous_id}.webp");
+        std::fs::write(directory.join(&previous_relative), b"previous").unwrap();
+
+        let mismatched_id = Uuid::new_v4();
+        let mismatched_relative = format!("captures/2026/07/29/{mismatched_id}.webp");
+        std::fs::write(directory.join(&mismatched_relative), b"changed").unwrap();
+
+        let missing_id = Uuid::new_v4();
+        let orphan_id = Uuid::new_v4();
+        std::fs::write(
+            captures.join(format!("{orphan_id}.webp")),
+            b"not indexed in sqlite",
+        )
+        .unwrap();
+
+        let records = vec![
+            inventory_record(
+                current_id,
+                today_start + chrono::Duration::hours(1),
+                current_relative,
+                Some(current_thumbnail),
+                7,
+            ),
+            inventory_record(
+                previous_id,
+                today_start - chrono::Duration::seconds(1),
+                previous_relative,
+                None,
+                8,
+            ),
+            inventory_record(
+                mismatched_id,
+                today_start + chrono::Duration::hours(2),
+                mismatched_relative,
+                None,
+                999,
+            ),
+            inventory_record(
+                missing_id,
+                today_start + chrono::Duration::hours(3),
+                format!("captures/2026/07/29/{missing_id}.webp"),
+                None,
+                10,
+            ),
+        ];
+
+        let inventory =
+            verified_capture_inventory(&directory, &records, today_start, tomorrow_start);
+
+        assert_eq!(inventory, (1, 7 + 5 + 8));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn inventory_rejects_paths_outside_the_managed_capture_roots() {
+        let directory = temporary_test_directory();
+        let capture_id = Uuid::new_v4();
+        let outside = directory.join(format!("{capture_id}.webp"));
+        std::fs::write(&outside, b"outside").unwrap();
+        let start = DateTime::parse_from_rfc3339("2026-07-29T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let records = vec![inventory_record(
+            capture_id,
+            start,
+            format!("{capture_id}.webp"),
+            None,
+            7,
+        )];
+
+        assert_eq!(
+            verified_capture_inventory(
+                &directory,
+                &records,
+                start,
+                start + chrono::Duration::days(1)
+            ),
+            (0, 0)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]

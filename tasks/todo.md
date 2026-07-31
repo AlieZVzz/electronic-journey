@@ -3,11 +3,12 @@
 ## 高优先级：Phase 1 本地可信 MVP
 
 - [x] 确认首发最低版本为 macOS Sequoia 15 与 Windows 11。
-- [ ] 用 ScreenCaptureKit 实现 macOS 权限、显示器枚举和单次截图。
+- [x] 用 ScreenCaptureKit 实现 macOS 显示器枚举和单次截图，保留显式 CoreGraphics 权限预检与申请。
+- [ ] 在已授权的 macOS 15+ 真机运行 ScreenCaptureKit 交互测试，验证 Retina、多显示器和权限撤销后的安全失败。
 - [x] 用 Windows.Graphics.Capture 实现 Windows 捕获适配器。
 - [ ] 在 macOS 菜单栏和 Windows 各方向任务栏上真机验收稳定内容去重，覆盖 Retina/DPI、自动隐藏、全屏和多显示器。
 - [ ] 在 macOS 与 Windows 真机验收锁屏、快速用户切换、休眠/现代待机、唤醒、空闲阈值变更及多重阻塞事件顺序。
-- [ ] 将“今日数量”和存储占用统计切换为 SQLite 与可验证文件状态。
+- [x] 将“今日数量”和存储占用统计切换为 SQLite 与可验证文件状态。
 - [ ] 实现缩略图失败后的后台重建和数据库状态更新。
 - [ ] 在 macOS 与 Windows 真机验收托盘图标、动态状态、开始/暂停/停止、缺少权限提示、主窗口打开和退出行为。
 

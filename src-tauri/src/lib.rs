@@ -40,16 +40,11 @@ fn spawn_startup_recovery(app_handle: tauri::AppHandle) {
         let mut recovery_failed = timeline::reconcile_capture_index(&app_handle, &pool)
             .await
             .is_err();
-        let inventory_app = app_handle.clone();
-        match tauri::async_runtime::spawn_blocking(move || {
-            capture_pipeline::capture_inventory(&inventory_app)
-        })
-        .await
+        if commands::refresh_local_inventory(&app_handle, true)
+            .await
+            .is_err()
         {
-            Ok(Ok((count, bytes))) => app_handle
-                .state::<RuntimeState>()
-                .set_inventory(count, bytes),
-            _ => recovery_failed = true,
+            recovery_failed = true;
         }
         if recovery_failed {
             app_handle

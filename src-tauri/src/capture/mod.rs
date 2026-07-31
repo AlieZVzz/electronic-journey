@@ -57,12 +57,15 @@ pub(crate) struct ScreenRect {
 
 #[derive(Debug, Error)]
 pub enum CaptureError {
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     #[error("screen capture is not implemented for this platform adapter yet")]
     NotImplemented,
     #[error("screen capture permission was not granted")]
     PermissionDenied,
+    #[cfg(target_os = "windows")]
     #[error("screen capture permission state could not be checked")]
     PermissionCheckFailed,
+    #[cfg(target_os = "windows")]
     #[error("screen capture permission request could not be completed")]
     PermissionRequestFailed,
     #[error("display is no longer available: {0}")]

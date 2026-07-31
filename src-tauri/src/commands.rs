@@ -3,7 +3,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex,
     },
-    time::Duration as StdDuration,
+    time::{Duration as StdDuration, Instant},
 };
 
 use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
@@ -18,10 +18,12 @@ use crate::{
     capture_pipeline,
     error::AppError,
     privacy::{self, CaptureDecision, PrivacyContext, PrivacyReason},
-    scheduler::{next_capture_at, FIRST_CAPTURE_DELAY},
+    scheduler::{next_capture_at, DEFAULT_CAPTURE_INTERVAL_MINUTES, FIRST_CAPTURE_DELAY},
     system_monitor::SystemEvent,
     timeline, upload,
 };
+
+const INVENTORY_MAX_AGE: StdDuration = StdDuration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,7 +54,7 @@ pub struct CaptureSettings {
 impl Default for CaptureSettings {
     fn default() -> Self {
         Self {
-            interval_minutes: 5,
+            interval_minutes: DEFAULT_CAPTURE_INTERVAL_MINUTES,
             idle_pause_minutes: 10,
         }
     }
@@ -116,9 +118,17 @@ struct SystemConditions {
 }
 
 #[derive(Default)]
+struct InventoryFreshness {
+    local_date: Option<NaiveDate>,
+    verified_at: Option<Instant>,
+}
+
+#[derive(Default)]
 pub struct RuntimeState {
     snapshot: Mutex<AppSnapshot>,
     system_conditions: Mutex<SystemConditions>,
+    inventory_freshness: Mutex<InventoryFreshness>,
+    inventory_refresh: tokio::sync::Mutex<()>,
     schedule_generation: AtomicU64,
     recording_requested: AtomicBool,
     system_monitor_ready: AtomicBool,
@@ -151,6 +161,8 @@ impl RuntimeState {
         Self {
             snapshot: Mutex::new(snapshot),
             system_conditions: Mutex::new(SystemConditions::default()),
+            inventory_freshness: Mutex::new(InventoryFreshness::default()),
+            inventory_refresh: tokio::sync::Mutex::new(()),
             schedule_generation: AtomicU64::new(0),
             recording_requested: AtomicBool::new(false),
             system_monitor_ready: AtomicBool::new(true),
@@ -327,10 +339,33 @@ impl RuntimeState {
         }
     }
 
-    pub fn set_inventory(&self, count: u32, bytes: u64) {
+    fn inventory_is_fresh(&self, local_date: NaiveDate) -> bool {
+        self.inventory_freshness
+            .lock()
+            .map(|freshness| {
+                freshness.local_date == Some(local_date)
+                    && freshness
+                        .verified_at
+                        .is_some_and(|verified_at| verified_at.elapsed() < INVENTORY_MAX_AGE)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn set_inventory(&self, local_date: NaiveDate, count: u32, bytes: u64) {
         if let Ok(mut snapshot) = self.snapshot.lock() {
             snapshot.today_count = count;
             snapshot.local_storage_bytes = bytes;
+        }
+        if let Ok(mut freshness) = self.inventory_freshness.lock() {
+            freshness.local_date = Some(local_date);
+            freshness.verified_at = Some(Instant::now());
+        }
+    }
+
+    fn invalidate_inventory(&self) {
+        if let Ok(mut freshness) = self.inventory_freshness.lock() {
+            freshness.local_date = None;
+            freshness.verified_at = None;
         }
     }
 
@@ -347,16 +382,6 @@ impl RuntimeState {
             .is_ok()
     }
 
-    fn capture_deleted(&self, captured_at_utc: DateTime<Utc>, storage_size: u64) {
-        if let Ok(mut snapshot) = self.snapshot.lock() {
-            if captured_at_utc.with_timezone(&Local).date_naive() == Local::now().date_naive() {
-                snapshot.today_count = snapshot.today_count.saturating_sub(1);
-            }
-            snapshot.local_storage_bytes =
-                snapshot.local_storage_bytes.saturating_sub(storage_size);
-        }
-    }
-
     fn schedule_is_active(&self, generation: u64) -> bool {
         self.schedule_generation.load(Ordering::SeqCst) == generation
             && self
@@ -366,7 +391,7 @@ impl RuntimeState {
                 .unwrap_or(false)
     }
 
-    fn capture_completed(&self, generation: u64, stored_bytes: Option<u64>) -> Option<StdDuration> {
+    fn capture_completed(&self, generation: u64) -> Option<StdDuration> {
         if self.schedule_generation.load(Ordering::SeqCst) != generation {
             return None;
         }
@@ -374,23 +399,18 @@ impl RuntimeState {
         if !matches!(snapshot.state, RecordingState::Running) {
             return None;
         }
-        if let Some(storage_size) = stored_bytes {
-            snapshot.today_count = snapshot.today_count.saturating_add(1);
-            snapshot.local_storage_bytes =
-                snapshot.local_storage_bytes.saturating_add(storage_size);
-        }
         snapshot.last_error = None;
         let delay = StdDuration::from_secs(u64::from(snapshot.settings.interval_minutes) * 60);
         snapshot.next_capture_at = Some(next_capture_at(Utc::now(), delay).to_rfc3339());
         Some(delay)
     }
 
-    fn capture_succeeded(&self, generation: u64, storage_size: u64) -> Option<StdDuration> {
-        self.capture_completed(generation, Some(storage_size))
+    fn capture_succeeded(&self, generation: u64) -> Option<StdDuration> {
+        self.capture_completed(generation)
     }
 
     fn capture_skipped(&self, generation: u64) -> Option<StdDuration> {
-        self.capture_completed(generation, None)
+        self.capture_completed(generation)
     }
 
     fn capture_failed(&self, generation: u64, message: String, permission_denied: bool) {
@@ -457,6 +477,48 @@ impl RuntimeState {
             return Ok(Some((generation, FIRST_CAPTURE_DELAY)));
         }
         Ok(None)
+    }
+}
+
+fn current_local_day_bounds() -> Option<(NaiveDate, DateTime<Utc>, DateTime<Utc>)> {
+    let local_date = Local::now().date_naive();
+    let tomorrow = local_date.succ_opt()?;
+    let start = Local
+        .from_local_datetime(&local_date.and_hms_opt(0, 0, 0)?)
+        .earliest()?;
+    let end = Local
+        .from_local_datetime(&tomorrow.and_hms_opt(0, 0, 0)?)
+        .earliest()?;
+    Some((
+        local_date,
+        start.with_timezone(&Utc),
+        end.with_timezone(&Utc),
+    ))
+}
+
+pub(crate) async fn refresh_local_inventory(app: &AppHandle, force: bool) -> Result<(), ()> {
+    let (local_date, today_start_utc, tomorrow_start_utc) = current_local_day_bounds().ok_or(())?;
+    let runtime = app.state::<RuntimeState>();
+    if !force && runtime.inventory_is_fresh(local_date) {
+        return Ok(());
+    }
+
+    let _refresh_guard = runtime.inventory_refresh.lock().await;
+    if !force && runtime.inventory_is_fresh(local_date) {
+        return Ok(());
+    }
+
+    let pool = app.state::<SqlitePool>().inner().clone();
+    match capture_pipeline::capture_inventory(app, &pool, today_start_utc, tomorrow_start_utc).await
+    {
+        Ok((count, bytes)) => {
+            runtime.set_inventory(local_date, count, bytes);
+            Ok(())
+        }
+        Err(_) => {
+            runtime.invalidate_inventory();
+            Err(())
+        }
     }
 }
 
@@ -564,13 +626,12 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
             )
             .await
             {
-                Ok(capture_pipeline::PersistCaptureOutcome::Stored(stored)) => {
-                    let Some(next_delay) =
-                        runtime.capture_succeeded(generation, stored.storage_size)
-                    else {
+                Ok(capture_pipeline::PersistCaptureOutcome::Stored) => {
+                    let Some(next_delay) = runtime.capture_succeeded(generation) else {
                         return;
                     };
                     delay = next_delay;
+                    let _ = refresh_local_inventory(&app, true).await;
                 }
                 Ok(capture_pipeline::PersistCaptureOutcome::SkippedDuplicate) => {
                     let Some(next_delay) = runtime.capture_skipped(generation) else {
@@ -594,10 +655,14 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
 
 #[tauri::command]
 pub async fn get_app_snapshot(
+    app: AppHandle,
     state: State<'_, RuntimeState>,
     pool: State<'_, SqlitePool>,
 ) -> Result<AppSnapshot, String> {
     crate::trace_startup("cached snapshot requested");
+    refresh_local_inventory(&app, false)
+        .await
+        .map_err(|_| "无法验证本地截图统计，请稍后重试。".to_string())?;
     let mut snapshot = state.snapshot().map_err(|error| error.to_string())?;
     snapshot.pending_uploads = crate::database::active_upload_count(pool.inner())
         .await
@@ -784,7 +849,6 @@ pub async fn read_timeline_thumbnail(
 pub async fn delete_timeline_capture(
     app: AppHandle,
     pool: State<'_, SqlitePool>,
-    runtime: State<'_, RuntimeState>,
     capture_id: String,
 ) -> Result<(), String> {
     let capture_id =
@@ -793,11 +857,11 @@ pub async fn delete_timeline_capture(
         .await
         .map_err(|_| "无法读取截图索引。".to_string())?
         .ok_or_else(|| "截图不存在或已经被删除。".to_string())?;
-    match capture_pipeline::delete_saved_capture(&app, pool.inner(), capture_id, &record).await {
-        Ok(deleted) => {
-            runtime.capture_deleted(deleted.captured_at_utc, deleted.storage_size);
-            Ok(())
-        }
+    let deletion =
+        capture_pipeline::delete_saved_capture(&app, pool.inner(), capture_id, &record).await;
+    let _ = refresh_local_inventory(&app, true).await;
+    match deletion {
+        Ok(()) => Ok(()),
         Err(capture_pipeline::CapturePipelineError::CaptureUploadInProgress) => {
             Err("这张截图正在上传，请等待上传结束后再删除。".to_string())
         }
@@ -1364,25 +1428,9 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_capture_updates_local_inventory_without_underflow() {
-        let runtime = RuntimeState::from_permission_result(Ok(PermissionState::Granted));
-        runtime.set_inventory(2, 600);
-
-        runtime.capture_deleted(Utc::now(), 250);
-        let snapshot = runtime.snapshot().unwrap();
-        assert_eq!(snapshot.today_count, 1);
-        assert_eq!(snapshot.local_storage_bytes, 350);
-
-        runtime.capture_deleted(Utc::now(), 1_000);
-        let snapshot = runtime.snapshot().unwrap();
-        assert_eq!(snapshot.today_count, 0);
-        assert_eq!(snapshot.local_storage_bytes, 0);
-    }
-
-    #[test]
     fn skipping_a_duplicate_reschedules_without_changing_inventory() {
         let runtime = RuntimeState::from_permission_result(Ok(PermissionState::Granted));
-        runtime.set_inventory(2, 600);
+        runtime.set_inventory(Local::now().date_naive(), 2, 600);
         let (_, generation, _) = runtime.set_state(RecordingState::Running).unwrap();
 
         assert!(runtime.capture_skipped(generation).is_some());

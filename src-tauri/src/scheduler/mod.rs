@@ -1,14 +1,8 @@
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use std::time::Duration;
 
-pub const DEFAULT_CAPTURE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub const DEFAULT_CAPTURE_INTERVAL_MINUTES: u16 = 5;
 pub const FIRST_CAPTURE_DELAY: Duration = Duration::from_secs(10);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WakePolicy {
-    /// Resume the normal schedule without recreating events missed during sleep.
-    SkipMissedCaptures,
-}
 
 pub fn next_capture_at(now: DateTime<Utc>, delay: Duration) -> DateTime<Utc> {
     now + ChronoDuration::from_std(delay).expect("capture delays fit in chrono durations")

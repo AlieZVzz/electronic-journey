@@ -50,8 +50,9 @@ npm run dev:desktop
 
 ```bash
 npm run build:desktop:debug
-open "target/debug/bundle/macos/Electronic Journey.app"
 ```
+
+构建与本地签名验证成功后，命令会自动打开 debug 应用。
 
 切换到稳定 debug 身份后如需清除旧授权记录，可执行一次：
 

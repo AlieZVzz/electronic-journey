@@ -19,7 +19,7 @@
     "tauri": "tauri",
     "dev:desktop": "tauri dev",
     "build:desktop": "tauri build",
-    "build:desktop:debug": "tauri build --debug --bundles app && scripts/sign-debug-app.sh",
+    "build:desktop:debug": "tauri build --debug --bundles app && scripts/sign-debug-app.sh && open \"target/debug/bundle/macos/Electronic Journey.app\"",
     "sign:desktop:debug": "scripts/sign-debug-app.sh",
     "rust:check": "cargo check --workspace",
     "rust:test": "cargo test --workspace",
