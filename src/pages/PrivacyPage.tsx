@@ -6,12 +6,20 @@ import {
   type RuntimeAction,
 } from "../lib/interactionFeedback";
 import { captureIntervals, validateCaptureSettings } from "../lib/settings";
-import type { CaptureSettings } from "../types/app";
+import type { CaptureMode, CaptureSettings } from "../types/app";
 
 const captureIntervalOptions = captureIntervals.map((interval) => ({
   label: `每 ${interval} 分钟`,
   value: interval,
 }));
+
+const captureModeOptions: ReadonlyArray<{
+  label: string;
+  value: CaptureMode;
+}> = [
+  { label: "所有显示器", value: "all" },
+  { label: "当前使用的显示器", value: "active" },
+];
 
 interface PrivacyPageProps {
   settings: CaptureSettings;
@@ -54,6 +62,26 @@ export function PrivacyPage({
             }
             options={captureIntervalOptions}
             value={draft.intervalMinutes}
+          />
+        </label>
+
+        <label>
+          <span>
+            捕获范围
+            <small>
+              当前显示器按当前前台窗口所在的显示器判断；无法判断时使用主显示器。
+            </small>
+          </span>
+          <SelectControl<CaptureMode>
+            ariaLabel="捕获范围"
+            onChange={(captureMode) =>
+              setDraft({
+                ...draft,
+                captureMode,
+              })
+            }
+            options={captureModeOptions}
+            value={draft.captureMode}
           />
         </label>
 

@@ -7,6 +7,8 @@ export type RecordingState =
 
 export type PermissionState = "not_determined" | "granted" | "denied";
 
+export type CaptureMode = "all" | "active";
+
 export type SuspensionReason =
   | "screen_locked"
   | "system_sleeping"
@@ -15,6 +17,7 @@ export type SuspensionReason =
 export interface CaptureSettings {
   intervalMinutes: number;
   idlePauseMinutes: number;
+  captureMode: CaptureMode;
 }
 
 export interface AppSnapshot {
@@ -100,6 +103,33 @@ export interface UploadItemProgress {
   state: TimelineCapture["uploadState"];
 }
 
+export type UploadPhase =
+  | "pending"
+  | "connecting"
+  | "authenticating"
+  | "initializing_sftp"
+  | "validating_local"
+  | "preparing_remote"
+  | "transferring"
+  | "verifying_remote"
+  | "completed"
+  | "failed";
+
+export interface UploadPerformance {
+  phase: UploadPhase;
+  uploadedBytes: number;
+  bytesPerSecond: number;
+  estimatedRemainingSeconds: number | null;
+  connectionMs: number;
+  authenticationMs: number;
+  sftpInitializationMs: number;
+  localValidationMs: number;
+  transferBytes: number;
+  transferMs: number;
+  remoteMetadataOperations: number;
+  remoteMetadataMs: number;
+}
+
 export interface UploadBatchProgress {
   batchId: string;
   state: UploadBatchState;
@@ -109,6 +139,7 @@ export interface UploadBatchProgress {
   failedItems: number;
   items: UploadItemProgress[];
   lastError: string | null;
+  performance: UploadPerformance;
 }
 
 export interface TimelinePageResult {

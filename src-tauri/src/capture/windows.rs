@@ -30,8 +30,9 @@ use windows::{
                 IDXGIAdapter, IDXGIDevice,
             },
             Gdi::{
-                EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, DEVMODEW,
-                ENUM_CURRENT_SETTINGS, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+                EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, MonitorFromWindow,
+                DEVMODEW, ENUM_CURRENT_SETTINGS, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+                MONITOR_DEFAULTTONEAREST,
             },
         },
         System::WinRT::{
@@ -39,6 +40,7 @@ use windows::{
             Graphics::Capture::IGraphicsCaptureItemInterop,
             RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED,
         },
+        UI::WindowsAndMessaging::GetForegroundWindow,
     },
 };
 
@@ -421,6 +423,21 @@ impl ScreenCapture for PlatformCapture {
         tokio::task::spawn_blocking(move || capture_display(&display_id))
             .await
             .map_err(|_| CaptureError::CaptureFailed)?
+    }
+
+    async fn active_display(&self) -> Result<Option<DisplayId>, CaptureError> {
+        let foreground_window = unsafe { GetForegroundWindow() };
+        if foreground_window.0 == 0 {
+            return Ok(None);
+        }
+        let monitor = unsafe { MonitorFromWindow(foreground_window, MONITOR_DEFAULTTONEAREST) };
+        if monitor.0.is_null() {
+            return Ok(None);
+        }
+        Ok(native_displays()?
+            .into_iter()
+            .find(|display| display.handle == monitor)
+            .map(|display| DisplayId(display.id)))
     }
 
     async fn comparison_exclusions(

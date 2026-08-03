@@ -14,7 +14,9 @@ use tauri_plugin_dialog::DialogExt;
 use zeroize::Zeroize;
 
 use crate::{
-    capture::{CaptureError, PermissionState, PlatformCapture, ScreenCapture},
+    capture::{
+        CaptureError, DisplayId, DisplayInfo, PermissionState, PlatformCapture, ScreenCapture,
+    },
     capture_pipeline,
     error::AppError,
     privacy::{self, CaptureDecision, PrivacyContext, PrivacyReason},
@@ -49,6 +51,21 @@ pub enum SuspensionReason {
 pub struct CaptureSettings {
     pub interval_minutes: u16,
     pub idle_pause_minutes: u16,
+    #[serde(default)]
+    pub capture_mode: CaptureMode,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureMode {
+    All,
+    Active,
+}
+
+impl Default for CaptureMode {
+    fn default() -> Self {
+        Self::Active
+    }
 }
 
 impl Default for CaptureSettings {
@@ -56,7 +73,25 @@ impl Default for CaptureSettings {
         Self {
             interval_minutes: DEFAULT_CAPTURE_INTERVAL_MINUTES,
             idle_pause_minutes: 10,
+            capture_mode: CaptureMode::Active,
         }
+    }
+}
+
+fn select_capture_displays(
+    displays: &[DisplayInfo],
+    mode: CaptureMode,
+    active_display: Option<&DisplayId>,
+) -> Vec<DisplayInfo> {
+    match mode {
+        CaptureMode::All => displays.to_vec(),
+        CaptureMode::Active => active_display
+            .and_then(|display_id| displays.iter().find(|display| display.id == *display_id))
+            .or_else(|| displays.iter().find(|display| display.is_primary))
+            .or_else(|| displays.first())
+            .cloned()
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -195,6 +230,13 @@ impl RuntimeState {
     pub(crate) fn idle_pause_threshold(&self) -> Option<StdDuration> {
         let minutes = self.snapshot.lock().ok()?.settings.idle_pause_minutes;
         (minutes > 0).then(|| StdDuration::from_secs(u64::from(minutes) * 60))
+    }
+
+    fn capture_mode(&self) -> CaptureMode {
+        self.snapshot
+            .lock()
+            .map(|snapshot| snapshot.settings.capture_mode)
+            .unwrap_or_default()
     }
 
     fn snapshot(&self) -> Result<AppSnapshot, AppError> {
@@ -573,23 +615,24 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
                 return;
             }
 
+            let capture_mode = runtime.capture_mode();
             let capture_result = async {
                 let displays = PlatformCapture.list_displays().await?;
-                let display = displays
-                    .iter()
-                    .find(|display| display.is_primary)
-                    .or_else(|| displays.first())
-                    .ok_or_else(|| CaptureError::DisplayUnavailable("primary".into()))?;
-                let mut captured = PlatformCapture.capture(&display.id).await?;
-                captured.comparison_exclusions = PlatformCapture
-                    .comparison_exclusions(&app, &display.id, captured.width, captured.height)
-                    .await;
-                Ok::<_, CaptureError>((captured, display.id.0.clone()))
+                let active_display = match capture_mode {
+                    CaptureMode::All => None,
+                    CaptureMode::Active => PlatformCapture.active_display().await?,
+                };
+                let selected =
+                    select_capture_displays(&displays, capture_mode, active_display.as_ref());
+                if selected.is_empty() {
+                    return Err(CaptureError::DisplayUnavailable("no displays".into()));
+                }
+                Ok::<_, CaptureError>(selected)
             }
             .await;
 
-            let (captured, display_id) = match capture_result {
-                Ok(result) => result,
+            let displays = match capture_result {
+                Ok(displays) => displays,
                 Err(CaptureError::PermissionDenied) => {
                     runtime.capture_failed(
                         generation,
@@ -610,45 +653,74 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
                 }
             };
 
-            if !runtime.schedule_is_active(generation) {
-                return;
-            }
             let pool = app.state::<SqlitePool>();
-            let captured_at_utc = Utc::now();
             let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "Etc/Unknown".into());
-            match capture_pipeline::persist_capture(
-                &app,
-                pool.inner(),
-                captured,
-                &display_id,
-                captured_at_utc,
-                &timezone,
-            )
-            .await
-            {
-                Ok(capture_pipeline::PersistCaptureOutcome::Stored) => {
-                    let Some(next_delay) = runtime.capture_succeeded(generation) else {
-                        return;
-                    };
-                    delay = next_delay;
-                    let _ = refresh_local_inventory(&app, true).await;
-                }
-                Ok(capture_pipeline::PersistCaptureOutcome::SkippedDuplicate) => {
-                    let Some(next_delay) = runtime.capture_skipped(generation) else {
-                        return;
-                    };
-                    delay = next_delay;
-                }
-                Err(_) => {
-                    runtime.capture_failed(
-                        generation,
-                        "截图未能写入本地存储，记录已停止。".into(),
-                        false,
-                    );
-                    crate::tray::refresh(&app);
+            let mut stored_any = false;
+            for display in displays {
+                if !runtime.schedule_is_active(generation) {
                     return;
                 }
+                let mut captured = match PlatformCapture.capture(&display.id).await {
+                    Ok(captured) => captured,
+                    Err(CaptureError::PermissionDenied) => {
+                        runtime.capture_failed(
+                            generation,
+                            "屏幕录制权限已失效，请在系统设置中重新允许。".into(),
+                            true,
+                        );
+                        crate::tray::refresh(&app);
+                        return;
+                    }
+                    Err(_) => {
+                        runtime.capture_failed(
+                            generation,
+                            "系统截图失败，记录已停止；请检查屏幕录制权限和显示器状态。".into(),
+                            false,
+                        );
+                        crate::tray::refresh(&app);
+                        return;
+                    }
+                };
+                captured.comparison_exclusions = PlatformCapture
+                    .comparison_exclusions(&app, &display.id, captured.width, captured.height)
+                    .await;
+                let captured_at_utc = Utc::now();
+                match capture_pipeline::persist_capture(
+                    &app,
+                    pool.inner(),
+                    captured,
+                    &display.id.0,
+                    captured_at_utc,
+                    &timezone,
+                )
+                .await
+                {
+                    Ok(capture_pipeline::PersistCaptureOutcome::Stored) => {
+                        stored_any = true;
+                        let _ = refresh_local_inventory(&app, true).await;
+                    }
+                    Ok(capture_pipeline::PersistCaptureOutcome::SkippedDuplicate) => {}
+                    Err(_) => {
+                        runtime.capture_failed(
+                            generation,
+                            "截图未能写入本地存储，记录已停止。".into(),
+                            false,
+                        );
+                        crate::tray::refresh(&app);
+                        return;
+                    }
+                }
             }
+
+            let next_delay = if stored_any {
+                runtime.capture_succeeded(generation)
+            } else {
+                runtime.capture_skipped(generation)
+            };
+            let Some(next_delay) = next_delay else {
+                return;
+            };
+            delay = next_delay;
         }
     });
 }
@@ -705,6 +777,7 @@ pub async fn update_capture_settings(
         &crate::database::CaptureSettingsRecord {
             interval_minutes: settings.interval_minutes,
             idle_pause_minutes: settings.idle_pause_minutes,
+            capture_mode: settings.capture_mode,
         },
     )
     .await
@@ -1056,7 +1129,7 @@ pub async fn test_remote_profile(
         .ok_or_else(|| "请先保存远程服务器配置。".to_string())?;
     upload::validate_stored_profile(&app, &profile)
         .map_err(|error| upload_error_message(&error))?;
-    let session = upload::RemoteSession::connect(&profile)
+    let session = upload::RemoteSession::connect(&profile, |_| {})
         .await
         .map_err(|error| upload_error_message(&error))?;
     let result = session
@@ -1113,19 +1186,27 @@ fn upload_error_message_from_code(code: &str) -> String {
 
 fn upload_progress_from_record(
     status: crate::database::UploadBatchStatus,
+    diagnostics: &upload::UploadDiagnosticsRegistry,
 ) -> Result<upload::UploadBatchProgress, String> {
     let last_error = status
         .items
         .iter()
         .find_map(|item| item.last_error_code.as_deref())
         .map(upload_error_message_from_code);
+    let batch_id =
+        uuid::Uuid::parse_str(&status.batch.id).map_err(|_| "上传批次标识无效。".to_string())?;
+    let total_bytes =
+        u64::try_from(status.batch.total_bytes).map_err(|_| "上传批次大小无效。".to_string())?;
+    let uploaded_bytes =
+        u64::try_from(status.batch.uploaded_bytes).map_err(|_| "上传完成大小无效。".to_string())?;
+    let performance =
+        diagnostics.snapshot(batch_id, total_bytes, uploaded_bytes, &status.batch.state);
     Ok(upload::UploadBatchProgress {
         batch_id: status.batch.id,
         state: status.batch.state,
         total_items: usize::try_from(status.batch.total_items)
             .map_err(|_| "上传批次数量无效。".to_string())?,
-        total_bytes: u64::try_from(status.batch.total_bytes)
-            .map_err(|_| "上传批次大小无效。".to_string())?,
+        total_bytes,
         uploaded_items: usize::try_from(status.batch.completed_items)
             .map_err(|_| "上传完成数量无效。".to_string())?,
         failed_items: usize::try_from(status.batch.failed_items)
@@ -1139,18 +1220,20 @@ fn upload_progress_from_record(
             })
             .collect(),
         last_error,
+        performance,
     })
 }
 
 async fn load_upload_progress(
     pool: &SqlitePool,
     batch_id: uuid::Uuid,
+    diagnostics: &upload::UploadDiagnosticsRegistry,
 ) -> Result<upload::UploadBatchProgress, String> {
     let status = crate::database::upload_batch_status(pool, batch_id)
         .await
         .map_err(|_| "无法读取后台上传状态。".to_string())?
         .ok_or_else(|| "上传批次不存在。".to_string())?;
-    upload_progress_from_record(status)
+    upload_progress_from_record(status, diagnostics)
 }
 
 pub(crate) struct UploadRunResult {
@@ -1171,13 +1254,24 @@ pub(crate) async fn run_upload_batch(
     let items = crate::database::upload_batch_items(&pool, batch_id)
         .await
         .map_err(|_| ())?;
-    let session = match upload::RemoteSession::connect(&profile).await {
+    let total_bytes = items.iter().fold(0_u64, |total, item| {
+        total.saturating_add(u64::try_from(item.file_size).unwrap_or(0))
+    });
+    let diagnostics = app.state::<upload::UploadDiagnosticsRegistry>();
+    diagnostics.begin(batch_id, total_bytes);
+    diagnostics.set_phase(batch_id, "connecting");
+    let mut session = match upload::RemoteSession::connect(&profile, |progress| {
+        diagnostics.record_connection(batch_id, progress);
+    })
+    .await
+    {
         Ok(session) => session,
         Err(error) => {
             let error_code = upload_error_code(&error);
             crate::database::fail_active_upload_batch(&pool, batch_id, upload_error_code(&error))
                 .await
                 .map_err(|_| ())?;
+            diagnostics.finish(batch_id, true);
             return Ok(UploadRunResult {
                 uploaded_items: 0,
                 failed_items: items.len(),
@@ -1192,6 +1286,7 @@ pub(crate) async fn run_upload_batch(
         crate::database::set_upload_item_state(&pool, &item.id, "uploading", None)
             .await
             .map_err(|_| ())?;
+        diagnostics.set_phase(batch_id, "validating_local");
         let capture_id = uuid::Uuid::parse_str(&item.capture_id).map_err(|_| ())?;
         let record = crate::database::capture_file(&pool, capture_id)
             .await
@@ -1203,14 +1298,27 @@ pub(crate) async fn run_upload_batch(
             {
                 Err(upload::UploadError::InvalidCapture)
             } else {
+                let validation_started = std::time::Instant::now();
                 let read_app = app.clone();
                 let read_result = tauri::async_runtime::spawn_blocking(move || {
                     capture_pipeline::read_saved_capture(&read_app, capture_id, &record)
                 })
                 .await;
+                diagnostics.record_local_validation(batch_id, validation_started.elapsed());
                 match read_result {
                     Ok(Ok(mut bytes)) => {
-                        let result = session.upload(&item.remote_path, &bytes).await;
+                        let previous = session.performance();
+                        let result = session
+                            .upload(&item.remote_path, &bytes, |event| {
+                                diagnostics.record_upload_event(
+                                    batch_id,
+                                    event,
+                                    previous.transfer_bytes,
+                                    previous.transfer,
+                                );
+                            })
+                            .await;
+                        diagnostics.record_session(batch_id, session.performance());
                         bytes.zeroize();
                         result
                     }
@@ -1223,12 +1331,14 @@ pub(crate) async fn run_upload_batch(
         match item_result {
             Ok(()) => {
                 uploaded_items += 1;
+                diagnostics.complete_item(batch_id, u64::try_from(item.file_size).unwrap_or(0));
                 crate::database::set_upload_item_state(&pool, &item.id, "uploaded", None)
                     .await
                     .map_err(|_| ())?;
             }
             Err(error) => {
                 failed_items += 1;
+                diagnostics.fail_item(batch_id);
                 crate::database::set_upload_item_state(
                     &pool,
                     &item.id,
@@ -1244,6 +1354,7 @@ pub(crate) async fn run_upload_batch(
     crate::database::finish_upload_batch(&pool, batch_id, uploaded_items, failed_items)
         .await
         .map_err(|_| ())?;
+    diagnostics.finish(batch_id, failed_items > 0);
     Ok(UploadRunResult {
         uploaded_items,
         failed_items,
@@ -1255,6 +1366,7 @@ pub(crate) async fn run_upload_batch(
 pub async fn upload_selected_captures(
     app: AppHandle,
     pool: State<'_, SqlitePool>,
+    diagnostics: State<'_, upload::UploadDiagnosticsRegistry>,
     capture_ids: Vec<String>,
 ) -> Result<upload::UploadBatchProgress, String> {
     let capture_ids = capture_ids
@@ -1288,7 +1400,8 @@ pub async fn upload_selected_captures(
         }
         _ => "无法创建上传批次。".to_string(),
     })?;
-    let progress = load_upload_progress(pool.inner(), batch.id).await?;
+    let progress = load_upload_progress(pool.inner(), batch.id, diagnostics.inner()).await?;
+    diagnostics.begin(batch.id, progress.total_bytes);
     let background_pool = pool.inner().clone();
     tauri::async_runtime::spawn(async move {
         if run_upload_batch(app, background_pool.clone(), profile, batch.id)
@@ -1311,16 +1424,18 @@ pub async fn sync_today_now(app: AppHandle, pool: State<'_, SqlitePool>) -> Resu
 #[tauri::command]
 pub async fn get_upload_batch_status(
     pool: State<'_, SqlitePool>,
+    diagnostics: State<'_, upload::UploadDiagnosticsRegistry>,
     batch_id: String,
 ) -> Result<upload::UploadBatchProgress, String> {
     let batch_id =
         uuid::Uuid::parse_str(&batch_id).map_err(|_| "上传批次标识无效。".to_string())?;
-    load_upload_progress(pool.inner(), batch_id).await
+    load_upload_progress(pool.inner(), batch_id, diagnostics.inner()).await
 }
 
 #[tauri::command]
 pub async fn get_active_upload_batch(
     pool: State<'_, SqlitePool>,
+    diagnostics: State<'_, upload::UploadDiagnosticsRegistry>,
 ) -> Result<Option<upload::UploadBatchProgress>, String> {
     let Some(batch_id) = crate::database::active_upload_batch_id(pool.inner())
         .await
@@ -1328,7 +1443,9 @@ pub async fn get_active_upload_batch(
     else {
         return Ok(None);
     };
-    load_upload_progress(pool.inner(), batch_id).await.map(Some)
+    load_upload_progress(pool.inner(), batch_id, diagnostics.inner())
+        .await
+        .map(Some)
 }
 
 #[cfg(test)]
@@ -1340,6 +1457,7 @@ mod tests {
         let settings = CaptureSettings::default();
         assert_eq!(settings.interval_minutes, 5);
         assert_eq!(settings.idle_pause_minutes, 10);
+        assert_eq!(settings.capture_mode, CaptureMode::Active);
         assert!(settings.validate().is_ok());
     }
 
@@ -1557,6 +1675,7 @@ mod tests {
             .update_settings(CaptureSettings {
                 interval_minutes: 5,
                 idle_pause_minutes: 0,
+                capture_mode: CaptureMode::Active,
             })
             .unwrap();
 
@@ -1570,11 +1689,66 @@ mod tests {
             .restore_settings(CaptureSettings {
                 interval_minutes: 30,
                 idle_pause_minutes: 45,
+                capture_mode: CaptureMode::All,
             })
             .unwrap();
 
         let snapshot = runtime.snapshot().unwrap();
         assert_eq!(snapshot.settings.interval_minutes, 30);
         assert_eq!(snapshot.settings.idle_pause_minutes, 45);
+        assert_eq!(snapshot.settings.capture_mode, CaptureMode::All);
+    }
+
+    #[test]
+    fn capture_mode_selects_all_displays_or_the_active_display() {
+        let displays = vec![
+            DisplayInfo {
+                id: DisplayId("primary".into()),
+                name: "主显示器".into(),
+                width: 1920,
+                height: 1080,
+                is_primary: true,
+            },
+            DisplayInfo {
+                id: DisplayId("secondary".into()),
+                name: "显示器 secondary".into(),
+                width: 2560,
+                height: 1440,
+                is_primary: false,
+            },
+        ];
+
+        assert_eq!(
+            select_capture_displays(&displays, CaptureMode::All, None)
+                .into_iter()
+                .map(|display| display.id.0)
+                .collect::<Vec<_>>(),
+            vec!["primary", "secondary"]
+        );
+        assert_eq!(
+            select_capture_displays(
+                &displays,
+                CaptureMode::Active,
+                Some(&DisplayId("secondary".into()))
+            )
+            .into_iter()
+            .map(|display| display.id.0)
+            .collect::<Vec<_>>(),
+            vec!["secondary"]
+        );
+        assert_eq!(
+            select_capture_displays(&displays, CaptureMode::Active, None)
+                .into_iter()
+                .map(|display| display.id.0)
+                .collect::<Vec<_>>(),
+            vec!["primary"]
+        );
+    }
+
+    #[test]
+    fn legacy_capture_settings_default_to_active_mode() {
+        let settings: CaptureSettings =
+            serde_json::from_str(r#"{"intervalMinutes":5,"idlePauseMinutes":10}"#).unwrap();
+        assert_eq!(settings.capture_mode, CaptureMode::Active);
     }
 }

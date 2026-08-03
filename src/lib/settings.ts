@@ -5,6 +5,7 @@ export const captureIntervals = [1, 2, 5, 10, 15, 30, 60] as const;
 export const defaultCaptureSettings: CaptureSettings = {
   intervalMinutes: 5,
   idlePauseMinutes: 10,
+  captureMode: "active",
 };
 
 export function validateCaptureSettings(settings: CaptureSettings): string[] {

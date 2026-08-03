@@ -1,7 +1,8 @@
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use russh::{
@@ -9,7 +10,10 @@ use russh::{
     keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey},
     Disconnect,
 };
-use russh_sftp::client::SftpSession;
+use russh_sftp::{
+    client::{error::Error as SftpError, fs::Metadata, SftpSession},
+    protocol::StatusCode,
+};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use thiserror::Error;
@@ -22,6 +26,7 @@ use crate::database::RemoteProfileRecord;
 const PROFILE_ID: &str = "primary";
 const KEYRING_SERVICE: &str = "com.electronicjourney.app.ssh";
 const MAX_PRIVATE_KEY_BYTES: u64 = 64 * 1024;
+const MAX_DIAGNOSTIC_BATCHES: usize = 32;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +119,310 @@ pub struct UploadBatchProgress {
     pub failed_items: usize,
     pub items: Vec<UploadItemProgress>,
     pub last_error: Option<String>,
+    pub performance: UploadPerformanceSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadPerformanceSnapshot {
+    pub phase: String,
+    pub uploaded_bytes: u64,
+    pub bytes_per_second: u64,
+    pub estimated_remaining_seconds: Option<u64>,
+    pub connection_ms: u64,
+    pub authentication_ms: u64,
+    pub sftp_initialization_ms: u64,
+    pub local_validation_ms: u64,
+    pub transfer_bytes: u64,
+    pub transfer_ms: u64,
+    pub remote_metadata_operations: u64,
+    pub remote_metadata_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UploadPhase {
+    Pending,
+    Connecting,
+    Authenticating,
+    InitializingSftp,
+    ValidatingLocal,
+    PreparingRemote,
+    Transferring,
+    VerifyingRemote,
+    Completed,
+    Failed,
+}
+
+impl UploadPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Connecting => "connecting",
+            Self::Authenticating => "authenticating",
+            Self::InitializingSftp => "initializing_sftp",
+            Self::ValidatingLocal => "validating_local",
+            Self::PreparingRemote => "preparing_remote",
+            Self::Transferring => "transferring",
+            Self::VerifyingRemote => "verifying_remote",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BatchPerformance {
+    total_bytes: u64,
+    phase: UploadPhase,
+    completed_bytes: u64,
+    current_item_bytes: u64,
+    connection: Duration,
+    authentication: Duration,
+    sftp_initialization: Duration,
+    local_validation: Duration,
+    transfer_bytes: u64,
+    transfer: Duration,
+    remote_metadata_operations: u64,
+    remote_metadata: Duration,
+}
+
+impl BatchPerformance {
+    fn new(total_bytes: u64) -> Self {
+        Self {
+            total_bytes,
+            phase: UploadPhase::Pending,
+            completed_bytes: 0,
+            current_item_bytes: 0,
+            connection: Duration::ZERO,
+            authentication: Duration::ZERO,
+            sftp_initialization: Duration::ZERO,
+            local_validation: Duration::ZERO,
+            transfer_bytes: 0,
+            transfer: Duration::ZERO,
+            remote_metadata_operations: 0,
+            remote_metadata: Duration::ZERO,
+        }
+    }
+
+    fn snapshot(&self) -> UploadPerformanceSnapshot {
+        let uploaded_bytes = self
+            .completed_bytes
+            .saturating_add(self.current_item_bytes)
+            .min(self.total_bytes);
+        let bytes_per_second = if self.transfer.is_zero() {
+            0
+        } else {
+            (self.transfer_bytes as f64 / self.transfer.as_secs_f64()).round() as u64
+        };
+        let estimated_remaining_seconds = if bytes_per_second == 0
+            || matches!(self.phase, UploadPhase::Completed | UploadPhase::Failed)
+        {
+            None
+        } else {
+            Some(
+                self.total_bytes
+                    .saturating_sub(uploaded_bytes)
+                    .div_ceil(bytes_per_second),
+            )
+        };
+        UploadPerformanceSnapshot {
+            phase: self.phase.as_str().to_string(),
+            uploaded_bytes,
+            bytes_per_second,
+            estimated_remaining_seconds,
+            connection_ms: duration_millis(self.connection),
+            authentication_ms: duration_millis(self.authentication),
+            sftp_initialization_ms: duration_millis(self.sftp_initialization),
+            local_validation_ms: duration_millis(self.local_validation),
+            transfer_bytes: self.transfer_bytes,
+            transfer_ms: duration_millis(self.transfer),
+            remote_metadata_operations: self.remote_metadata_operations,
+            remote_metadata_ms: duration_millis(self.remote_metadata),
+        }
+    }
+}
+
+#[derive(Default)]
+struct DiagnosticsInner {
+    batches: HashMap<Uuid, BatchPerformance>,
+    order: VecDeque<Uuid>,
+}
+
+#[derive(Default)]
+pub struct UploadDiagnosticsRegistry {
+    inner: Mutex<DiagnosticsInner>,
+}
+
+impl UploadDiagnosticsRegistry {
+    pub fn begin(&self, batch_id: Uuid, total_bytes: u64) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if inner.batches.contains_key(&batch_id) {
+            return;
+        }
+        while inner.order.len() >= MAX_DIAGNOSTIC_BATCHES {
+            if let Some(expired) = inner.order.pop_front() {
+                inner.batches.remove(&expired);
+            }
+        }
+        inner.order.push_back(batch_id);
+        inner
+            .batches
+            .insert(batch_id, BatchPerformance::new(total_bytes));
+    }
+
+    fn update(&self, batch_id: Uuid, update: impl FnOnce(&mut BatchPerformance)) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(batch) = inner.batches.get_mut(&batch_id) {
+                update(batch);
+            }
+        }
+    }
+
+    pub fn set_phase(&self, batch_id: Uuid, phase: &'static str) {
+        self.update(batch_id, |batch| {
+            batch.phase = match phase {
+                "connecting" => UploadPhase::Connecting,
+                "authenticating" => UploadPhase::Authenticating,
+                "initializing_sftp" => UploadPhase::InitializingSftp,
+                "validating_local" => UploadPhase::ValidatingLocal,
+                "preparing_remote" => UploadPhase::PreparingRemote,
+                "transferring" => UploadPhase::Transferring,
+                "verifying_remote" => UploadPhase::VerifyingRemote,
+                "completed" => UploadPhase::Completed,
+                "failed" => UploadPhase::Failed,
+                _ => UploadPhase::Pending,
+            };
+        });
+    }
+
+    pub fn record_connection(&self, batch_id: Uuid, progress: ConnectionProgress) {
+        self.update(batch_id, |batch| match progress {
+            ConnectionProgress::Connected(duration) => {
+                batch.connection = batch.connection.saturating_add(duration);
+                batch.phase = UploadPhase::Authenticating;
+            }
+            ConnectionProgress::Authenticated(duration) => {
+                batch.authentication = batch.authentication.saturating_add(duration);
+                batch.phase = UploadPhase::InitializingSftp;
+            }
+            ConnectionProgress::SftpInitialized(duration) => {
+                batch.sftp_initialization = batch.sftp_initialization.saturating_add(duration);
+            }
+        });
+    }
+
+    pub fn record_local_validation(&self, batch_id: Uuid, duration: Duration) {
+        self.update(batch_id, |batch| {
+            batch.local_validation = batch.local_validation.saturating_add(duration);
+        });
+    }
+
+    pub fn record_upload_event(
+        &self,
+        batch_id: Uuid,
+        event: UploadProgressEvent,
+        previous_transfer_bytes: u64,
+        previous_transfer: Duration,
+    ) {
+        self.update(batch_id, |batch| match event {
+            UploadProgressEvent::PreparingRemote => {
+                batch.phase = UploadPhase::PreparingRemote;
+                batch.current_item_bytes = 0;
+            }
+            UploadProgressEvent::Transferred { bytes, elapsed } => {
+                batch.phase = UploadPhase::Transferring;
+                batch.current_item_bytes = bytes;
+                batch.transfer_bytes = previous_transfer_bytes.saturating_add(bytes);
+                batch.transfer = previous_transfer.saturating_add(elapsed);
+            }
+            UploadProgressEvent::VerifyingRemote => {
+                batch.phase = UploadPhase::VerifyingRemote;
+            }
+        });
+    }
+
+    pub fn record_session(&self, batch_id: Uuid, performance: SessionPerformance) {
+        self.update(batch_id, |batch| {
+            batch.transfer_bytes = performance.transfer_bytes;
+            batch.transfer = performance.transfer;
+            batch.remote_metadata_operations = performance.remote_metadata_operations;
+            batch.remote_metadata = performance.remote_metadata;
+        });
+    }
+
+    pub fn complete_item(&self, batch_id: Uuid, file_size: u64) {
+        self.update(batch_id, |batch| {
+            batch.completed_bytes = batch.completed_bytes.saturating_add(file_size);
+            batch.current_item_bytes = 0;
+        });
+    }
+
+    pub fn fail_item(&self, batch_id: Uuid) {
+        self.update(batch_id, |batch| {
+            batch.current_item_bytes = 0;
+        });
+    }
+
+    pub fn finish(&self, batch_id: Uuid, failed: bool) {
+        self.update(batch_id, |batch| {
+            batch.current_item_bytes = 0;
+            batch.phase = if failed {
+                UploadPhase::Failed
+            } else {
+                UploadPhase::Completed
+            };
+        });
+    }
+
+    pub fn snapshot(
+        &self,
+        batch_id: Uuid,
+        total_bytes: u64,
+        uploaded_bytes: u64,
+        state: &str,
+    ) -> UploadPerformanceSnapshot {
+        if let Ok(inner) = self.inner.lock() {
+            if let Some(batch) = inner.batches.get(&batch_id) {
+                return batch.snapshot();
+            }
+        }
+        let mut fallback = BatchPerformance::new(total_bytes);
+        fallback.completed_bytes = uploaded_bytes;
+        fallback.phase = match state {
+            "completed" => UploadPhase::Completed,
+            "partial_failed" | "cancelled" => UploadPhase::Failed,
+            _ => UploadPhase::Pending,
+        };
+        fallback.snapshot()
+    }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ConnectionProgress {
+    Connected(Duration),
+    Authenticated(Duration),
+    SftpInitialized(Duration),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum UploadProgressEvent {
+    PreparingRemote,
+    Transferred { bytes: u64, elapsed: Duration },
+    VerifyingRemote,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SessionPerformance {
+    pub transfer_bytes: u64,
+    pub transfer: Duration,
+    pub remote_metadata_operations: u64,
+    pub remote_metadata: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -372,10 +681,15 @@ pub struct RemoteSession {
     handle: client::Handle<PinnedHandler>,
     sftp: SftpSession,
     remote_root: String,
+    verified_directories: HashSet<String>,
+    performance: SessionPerformance,
 }
 
 impl RemoteSession {
-    pub async fn connect(profile: &RemoteProfileRecord) -> Result<Self, UploadError> {
+    pub async fn connect(
+        profile: &RemoteProfileRecord,
+        mut on_progress: impl FnMut(ConnectionProgress),
+    ) -> Result<Self, UploadError> {
         let passphrase = load_passphrase(profile.has_passphrase).await?;
         let key_path = PathBuf::from(&profile.private_key_path);
         let mut passphrase_for_key = passphrase;
@@ -399,6 +713,7 @@ impl RemoteSession {
             inactivity_timeout: Some(Duration::from_secs(20)),
             ..Default::default()
         });
+        let connection_started = Instant::now();
         let connection = tokio::time::timeout(
             Duration::from_secs(20),
             client::connect(
@@ -419,6 +734,8 @@ impl RemoteSession {
             }
             Err(_) => return Err(UploadError::Connection),
         };
+        on_progress(ConnectionProgress::Connected(connection_started.elapsed()));
+        let authentication_started = Instant::now();
         let rsa_hash = handle
             .best_supported_rsa_hash()
             .await
@@ -434,6 +751,10 @@ impl RemoteSession {
         if !auth.success() {
             return Err(UploadError::Authentication);
         }
+        on_progress(ConnectionProgress::Authenticated(
+            authentication_started.elapsed(),
+        ));
+        let sftp_started = Instant::now();
         let channel = handle
             .channel_open_session()
             .await
@@ -445,10 +766,13 @@ impl RemoteSession {
         let sftp = SftpSession::new(channel.into_stream())
             .await
             .map_err(|_| UploadError::Sftp)?;
+        on_progress(ConnectionProgress::SftpInitialized(sftp_started.elapsed()));
         Ok(Self {
             handle,
             sftp,
             remote_root: profile.remote_root.clone(),
+            verified_directories: HashSet::new(),
+            performance: SessionPerformance::default(),
         })
     }
 
@@ -493,20 +817,20 @@ impl RemoteSession {
         })
     }
 
-    pub async fn upload(&self, relative_path: &str, bytes: &[u8]) -> Result<(), UploadError> {
+    pub fn performance(&self) -> SessionPerformance {
+        self.performance
+    }
+
+    pub async fn upload(
+        &mut self,
+        relative_path: &str,
+        bytes: &[u8],
+        mut on_progress: impl FnMut(UploadProgressEvent),
+    ) -> Result<(), UploadError> {
         validate_relative_remote_path(relative_path)?;
+        on_progress(UploadProgressEvent::PreparingRemote);
         let final_path = join_remote(&self.remote_root, relative_path)?;
-        if self
-            .sftp
-            .try_exists(&final_path)
-            .await
-            .map_err(|_| UploadError::RemoteInspect)?
-        {
-            let metadata = self
-                .sftp
-                .metadata(&final_path)
-                .await
-                .map_err(|_| UploadError::RemoteInspect)?;
+        if let Some(metadata) = self.inspect_optional(&final_path).await? {
             return if metadata.size == Some(bytes.len() as u64) {
                 Ok(())
             } else {
@@ -515,33 +839,34 @@ impl RemoteSession {
         }
         self.ensure_parent_directories(relative_path).await?;
         let temporary_path = format!("{final_path}.{}.part", Uuid::new_v4());
+        let transfer = self
+            .write_upload_file(&temporary_path, bytes, |bytes, elapsed| {
+                on_progress(UploadProgressEvent::Transferred { bytes, elapsed });
+            })
+            .await;
+        self.performance.transfer_bytes = self
+            .performance
+            .transfer_bytes
+            .saturating_add(transfer.bytes);
+        self.performance.transfer = self.performance.transfer.saturating_add(transfer.elapsed);
+        if let Err(error) = transfer.result {
+            let _ = self.sftp.remove_file(&temporary_path).await;
+            return Err(error);
+        }
+        on_progress(UploadProgressEvent::VerifyingRemote);
         let result = async {
-            self.write_file(&temporary_path, bytes).await?;
-            let metadata = self
-                .sftp
-                .metadata(&temporary_path)
-                .await
-                .map_err(|_| UploadError::RemoteInspect)?;
+            let metadata = self.inspect_required(&temporary_path).await?;
             if metadata.size != Some(bytes.len() as u64) {
                 return Err(UploadError::RemoteInspect);
             }
-            if self
-                .sftp
-                .try_exists(&final_path)
-                .await
-                .map_err(|_| UploadError::RemoteInspect)?
-            {
+            if self.inspect_optional(&final_path).await?.is_some() {
                 return Err(UploadError::RemoteConflict);
             }
             self.sftp
                 .rename(&temporary_path, &final_path)
                 .await
                 .map_err(|_| UploadError::RemoteRename)?;
-            let final_metadata = self
-                .sftp
-                .metadata(&final_path)
-                .await
-                .map_err(|_| UploadError::RemoteInspect)?;
+            let final_metadata = self.inspect_required(&final_path).await?;
             if final_metadata.size != Some(bytes.len() as u64) {
                 return Err(UploadError::RemoteInspect);
             }
@@ -552,6 +877,32 @@ impl RemoteSession {
             let _ = self.sftp.remove_file(&temporary_path).await;
         }
         result
+    }
+
+    async fn inspect_optional(&mut self, path: &str) -> Result<Option<Metadata>, UploadError> {
+        let started = Instant::now();
+        let result = self.sftp.metadata(path).await;
+        self.performance.remote_metadata_operations = self
+            .performance
+            .remote_metadata_operations
+            .saturating_add(1);
+        self.performance.remote_metadata = self
+            .performance
+            .remote_metadata
+            .saturating_add(started.elapsed());
+        match result {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
+                Ok(None)
+            }
+            Err(_) => Err(UploadError::RemoteInspect),
+        }
+    }
+
+    async fn inspect_required(&mut self, path: &str) -> Result<Metadata, UploadError> {
+        self.inspect_optional(path)
+            .await?
+            .ok_or(UploadError::RemoteInspect)
     }
 
     async fn write_file(&self, path: &str, bytes: &[u8]) -> Result<(), UploadError> {
@@ -567,7 +918,58 @@ impl RemoteSession {
         file.shutdown().await.map_err(|_| UploadError::RemoteClose)
     }
 
-    async fn ensure_parent_directories(&self, relative_path: &str) -> Result<(), UploadError> {
+    async fn write_upload_file(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        mut on_progress: impl FnMut(u64, Duration),
+    ) -> TransferAttempt {
+        let mut file = match self.sftp.create(path).await {
+            Ok(file) => file,
+            Err(_) => return TransferAttempt::failed(UploadError::RemoteCreate),
+        };
+        let started = Instant::now();
+        let mut transferred = 0_u64;
+        while transferred < bytes.len() as u64 {
+            let offset = usize::try_from(transferred).unwrap_or(bytes.len());
+            let written = match file.write(&bytes[offset..]).await {
+                Ok(0) => {
+                    return TransferAttempt {
+                        result: Err(UploadError::RemoteWrite),
+                        bytes: transferred,
+                        elapsed: started.elapsed(),
+                    }
+                }
+                Ok(written) => written,
+                Err(_) => {
+                    return TransferAttempt {
+                        result: Err(UploadError::RemoteWrite),
+                        bytes: transferred,
+                        elapsed: started.elapsed(),
+                    }
+                }
+            };
+            transferred = transferred.saturating_add(written as u64);
+            on_progress(transferred, started.elapsed());
+        }
+        if file.flush().await.is_err() {
+            return TransferAttempt {
+                result: Err(UploadError::RemoteFlush),
+                bytes: transferred,
+                elapsed: started.elapsed(),
+            };
+        }
+        let result = file.shutdown().await.map_err(|_| UploadError::RemoteClose);
+        let elapsed = started.elapsed();
+        on_progress(transferred, elapsed);
+        TransferAttempt {
+            result,
+            bytes: transferred,
+            elapsed,
+        }
+    }
+
+    async fn ensure_parent_directories(&mut self, relative_path: &str) -> Result<(), UploadError> {
         let parent = relative_path
             .rsplit_once('/')
             .map(|(parent, _)| parent)
@@ -575,25 +977,19 @@ impl RemoteSession {
         let mut current = self.remote_root.clone();
         for component in parent.split('/') {
             current = join_remote(&current, component)?;
-            if !self
-                .sftp
-                .try_exists(&current)
-                .await
-                .map_err(|_| UploadError::RemoteInspect)?
-            {
-                self.sftp
+            if self.verified_directories.contains(&current) {
+                continue;
+            }
+            match self.inspect_optional(&current).await? {
+                Some(metadata) if metadata.is_dir() => {}
+                Some(_) => return Err(UploadError::RemoteConflict),
+                None => self
+                    .sftp
                     .create_dir(&current)
                     .await
-                    .map_err(|_| UploadError::RemoteCreateDirectory)?;
-            } else if !self
-                .sftp
-                .metadata(&current)
-                .await
-                .map_err(|_| UploadError::RemoteInspect)?
-                .is_dir()
-            {
-                return Err(UploadError::RemoteConflict);
+                    .map_err(|_| UploadError::RemoteCreateDirectory)?,
             }
+            self.verified_directories.insert(current.clone());
         }
         Ok(())
     }
@@ -603,6 +999,22 @@ impl RemoteSession {
             .handle
             .disconnect(Disconnect::ByApplication, "upload complete", "")
             .await;
+    }
+}
+
+struct TransferAttempt {
+    result: Result<(), UploadError>,
+    bytes: u64,
+    elapsed: Duration,
+}
+
+impl TransferAttempt {
+    fn failed(error: UploadError) -> Self {
+        Self {
+            result: Err(error),
+            bytes: 0,
+            elapsed: Duration::ZERO,
+        }
     }
 }
 
@@ -660,5 +1072,63 @@ mod tests {
         assert!(validate_endpoint("user@server", 22).is_err());
         assert!(!valid_username("user name"));
         assert!(valid_username("journey_upload"));
+    }
+
+    #[test]
+    fn diagnostics_report_bytes_speed_eta_and_reset_failed_item_progress() {
+        let registry = UploadDiagnosticsRegistry::default();
+        let batch_id = Uuid::new_v4();
+        let mebibyte = 1024 * 1024;
+        registry.begin(batch_id, 10 * mebibyte);
+        registry.record_connection(
+            batch_id,
+            ConnectionProgress::Connected(Duration::from_millis(120)),
+        );
+        registry.record_local_validation(batch_id, Duration::from_millis(300));
+        registry.record_upload_event(
+            batch_id,
+            UploadProgressEvent::Transferred {
+                bytes: 2 * mebibyte,
+                elapsed: Duration::from_secs(1),
+            },
+            0,
+            Duration::ZERO,
+        );
+
+        let active = registry.snapshot(batch_id, 10 * mebibyte, 0, "uploading");
+        assert_eq!(active.phase, "transferring");
+        assert_eq!(active.uploaded_bytes, 2 * mebibyte);
+        assert_eq!(active.bytes_per_second, 2 * mebibyte);
+        assert_eq!(active.estimated_remaining_seconds, Some(4));
+        assert_eq!(active.connection_ms, 120);
+        assert_eq!(active.local_validation_ms, 300);
+
+        registry.fail_item(batch_id);
+        let failed_item = registry.snapshot(batch_id, 10 * mebibyte, 0, "uploading");
+        assert_eq!(failed_item.uploaded_bytes, 0);
+        assert_eq!(failed_item.transfer_bytes, 2 * mebibyte);
+    }
+
+    #[test]
+    fn completed_diagnostics_do_not_report_an_eta() {
+        let registry = UploadDiagnosticsRegistry::default();
+        let batch_id = Uuid::new_v4();
+        registry.begin(batch_id, 1024);
+        registry.record_upload_event(
+            batch_id,
+            UploadProgressEvent::Transferred {
+                bytes: 1024,
+                elapsed: Duration::from_secs(1),
+            },
+            0,
+            Duration::ZERO,
+        );
+        registry.complete_item(batch_id, 1024);
+        registry.finish(batch_id, false);
+
+        let completed = registry.snapshot(batch_id, 1024, 1024, "completed");
+        assert_eq!(completed.phase, "completed");
+        assert_eq!(completed.uploaded_bytes, 1024);
+        assert_eq!(completed.estimated_remaining_seconds, None);
     }
 }

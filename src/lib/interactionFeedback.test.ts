@@ -24,11 +24,15 @@ describe("interaction feedback", () => {
     const saved = {
       intervalMinutes: 5,
       idlePauseMinutes: 10,
+      captureMode: "active" as const,
     };
 
     expect(captureSettingsEqual(saved, { ...saved })).toBe(true);
     expect(
       captureSettingsEqual(saved, { ...saved, intervalMinutes: 15 }),
+    ).toBe(false);
+    expect(
+      captureSettingsEqual(saved, { ...saved, captureMode: "all" }),
     ).toBe(false);
   });
 });

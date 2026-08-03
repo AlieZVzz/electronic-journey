@@ -39,6 +39,7 @@ export function captureSettingsEqual(
 ): boolean {
   return (
     left.intervalMinutes === right.intervalMinutes &&
-    left.idlePauseMinutes === right.idlePauseMinutes
+    left.idlePauseMinutes === right.idlePauseMinutes &&
+    left.captureMode === right.captureMode
   );
 }

@@ -8,26 +8,28 @@ import {
 
 import { resolveSelectKey } from "../lib/selectControl";
 
-export interface SelectControlOption {
+export type SelectControlValue = number | string;
+
+export interface SelectControlOption<T extends SelectControlValue = number> {
   label: string;
-  value: number;
+  value: T;
 }
 
-interface SelectControlProps {
+interface SelectControlProps<T extends SelectControlValue = number> {
   ariaLabel: string;
   disabled?: boolean;
-  onChange: (value: number) => void;
-  options: readonly SelectControlOption[];
-  value: number;
+  onChange: (value: T) => void;
+  options: readonly SelectControlOption<T>[];
+  value: T;
 }
 
-export function SelectControl({
+export function SelectControl<T extends SelectControlValue>({
   ariaLabel,
   disabled = false,
   onChange,
   options,
   value,
-}: SelectControlProps) {
+}: SelectControlProps<T>) {
   const listboxId = useId();
   const rootRef = useRef<HTMLSpanElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -156,7 +158,7 @@ export function SelectControl({
                 index === activeIndex ? " is-active" : ""
               }${option.value === value ? " is-selected" : ""}`}
               id={`${listboxId}-option-${index}`}
-              key={option.value}
+              key={String(option.value)}
               onClick={() => commit(index)}
               onMouseEnter={() => setActiveIndex(index)}
               role="option"

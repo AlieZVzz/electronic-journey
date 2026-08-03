@@ -64,6 +64,8 @@ pub async fn connect(path: &Path) -> Result<SqlitePool, DatabaseError> {
 pub struct CaptureSettingsRecord {
     pub interval_minutes: u16,
     pub idle_pause_minutes: u16,
+    #[serde(default)]
+    pub capture_mode: crate::commands::CaptureMode,
 }
 
 pub async fn capture_settings(
@@ -978,6 +980,7 @@ pub struct UploadBatchStatusRecord {
     pub total_bytes: i64,
     pub completed_items: i64,
     pub failed_items: i64,
+    pub uploaded_bytes: i64,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -1012,7 +1015,12 @@ pub async fn upload_batch_status(
                 SELECT COUNT(*) FROM upload_items
                 WHERE upload_items.batch_id = upload_batches.id
                   AND upload_items.state = 'failed'
-            ) AS failed_items
+            ) AS failed_items,
+            (
+                SELECT COALESCE(SUM(file_size), 0) FROM upload_items
+                WHERE upload_items.batch_id = upload_batches.id
+                  AND upload_items.state = 'uploaded'
+            ) AS uploaded_bytes
         FROM upload_batches
         WHERE id = ?
         "#,
@@ -1363,6 +1371,7 @@ mod tests {
         let initial = CaptureSettingsRecord {
             interval_minutes: 15,
             idle_pause_minutes: 30,
+            capture_mode: crate::commands::CaptureMode::All,
         };
         save_capture_settings(&pool, &initial).await.unwrap();
         assert_eq!(capture_settings(&pool).await.unwrap(), Some(initial));
@@ -1370,6 +1379,7 @@ mod tests {
         let updated = CaptureSettingsRecord {
             interval_minutes: 60,
             idle_pause_minutes: 0,
+            capture_mode: crate::commands::CaptureMode::Active,
         };
         save_capture_settings(&pool, &updated).await.unwrap();
         assert_eq!(capture_settings(&pool).await.unwrap(), Some(updated));

@@ -10,7 +10,7 @@ mod unsupported;
 #[cfg(target_os = "windows")]
 mod windows;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DisplayId(pub String);
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -80,6 +80,13 @@ pub trait ScreenCapture: Send + Sync {
     async fn request_permission(&self) -> Result<PermissionState, CaptureError>;
     async fn list_displays(&self) -> Result<Vec<DisplayInfo>, CaptureError>;
     async fn capture(&self, display_id: &DisplayId) -> Result<CapturedImage, CaptureError>;
+
+    /// Returns the display containing the current foreground window when the
+    /// platform can determine it. Callers must fall back to the primary
+    /// display when this is unavailable.
+    async fn active_display(&self) -> Result<Option<DisplayId>, CaptureError> {
+        Ok(None)
+    }
 
     async fn comparison_exclusions(
         &self,

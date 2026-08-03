@@ -41,7 +41,7 @@ sync_today_now()
 - `save_remote_profile` 只接受结构化字段；私钥口令进入系统钥匙串。
 - `test_remote_profile` 创建、核对并删除零字节临时文件，不读取截图。
 - `upload_selected_captures` 只接受 1 至 500 个截图 UUID；Rust 从 SQLite 获取受控本地路径和确定性远端路径，创建后台批次后立即返回，不等待 SFTP 完成。
-- `get_upload_batch_status` 返回批次状态、实时成功/失败数量、逐项状态和脱敏错误。
+- `get_upload_batch_status` 返回批次状态、实时成功/失败数量、逐项状态、脱敏错误，以及仅存在于当前应用进程的聚合性能诊断：当前阶段、已上传字节、平均速率、预计剩余时间、连接/认证/SFTP 初始化/本地校验/传输耗时和远端元数据操作次数与耗时。诊断不包含路径、摘要、图片内容或凭据。
 - `get_active_upload_batch` 用于页面重新进入后恢复进度跟踪；同一时刻只允许一个 `pending` 或 `uploading` 批次。
 - `sync_today_now` 仅在用户已显式启用自动同步且计划未因安全错误暂停时创建当天同步任务；截图范围完全由 Rust 从 SQLite 筛选。
 

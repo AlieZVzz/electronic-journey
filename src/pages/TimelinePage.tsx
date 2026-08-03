@@ -12,6 +12,10 @@ import {
   addTimelineSelection,
   groupTimelineCaptures,
 } from "../lib/timeline";
+import {
+  activeUploadProgressMessage,
+  uploadDiagnosticsSummary,
+} from "../lib/uploadProgress";
 import type {
   TimelineCapture,
   UploadBatchProgress,
@@ -182,6 +186,9 @@ export function TimelinePage() {
   const uploadActive =
     uploadProgress?.state === "pending" ||
     uploadProgress?.state === "uploading";
+  const uploadDiagnostics = uploadProgress
+    ? uploadDiagnosticsSummary(uploadProgress)
+    : null;
   const resolvedPreviewScale =
     previewScale === "pixel"
       ? 1 / Math.max(1, window.devicePixelRatio)
@@ -327,11 +334,7 @@ export function TimelinePage() {
         }
         setUploadProgress(progress);
         applyUploadProgress(progress);
-        setUploadMessage(
-          `后台上传进行中：已处理 ${
-            progress.uploadedItems + progress.failedItems
-          } / ${progress.totalItems} 张。`,
-        );
+        setUploadMessage(activeUploadProgressMessage(progress));
       })
       .catch((reason) => {
         if (active) {
@@ -357,11 +360,7 @@ export function TimelinePage() {
           }
           setUploadProgress(progress);
           applyUploadProgress(progress);
-          setUploadMessage(
-            `检测到后台上传：已处理 ${
-              progress.uploadedItems + progress.failedItems
-            } / ${progress.totalItems} 张。`,
-          );
+          setUploadMessage(activeUploadProgressMessage(progress));
         })
         .catch((reason) => {
           if (active) {
@@ -389,15 +388,11 @@ export function TimelinePage() {
           }
           setUploadProgress(progress);
           applyUploadProgress(progress);
-          const processed =
-            progress.uploadedItems + progress.failedItems;
           if (
             progress.state === "pending" ||
             progress.state === "uploading"
           ) {
-            setUploadMessage(
-              `后台上传进行中：已处理 ${processed} / ${progress.totalItems} 张。`,
-            );
+            setUploadMessage(activeUploadProgressMessage(progress));
             return;
           }
           setUploadMessage(
@@ -713,9 +708,7 @@ export function TimelinePage() {
       );
       setUploadProgress(progress);
       applyUploadProgress(progress);
-      setUploadMessage(
-        `已开始在后台上传 ${progress.totalItems} 张原图；可以继续浏览或切换页面。`,
-      );
+      setUploadMessage(activeUploadProgressMessage(progress));
       setSelectedItems(new Map());
       window.dispatchEvent(
         new Event("electronic-journey:snapshot-changed"),
@@ -957,7 +950,10 @@ export function TimelinePage() {
               }`}
               role="status"
             >
-              <span>{uploadMessage}</span>
+              <span>
+                <strong>{uploadMessage}</strong>
+                {uploadDiagnostics && <small>{uploadDiagnostics}</small>}
+              </span>
               {!uploadActive && (
                 <button
                   aria-label="关闭上传提示"

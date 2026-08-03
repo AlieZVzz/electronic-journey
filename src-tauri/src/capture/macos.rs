@@ -2,7 +2,15 @@ use std::{ptr::NonNull, sync::mpsc, time::Duration};
 
 use async_trait::async_trait;
 use block2::RcBlock;
+use core_foundation::string::CFString;
 use core_graphics::{access::ScreenCaptureAccess, display::CGDisplay};
+use core_graphics::{
+    geometry::CGRect,
+    window::{
+        create_description_from_array, create_window_list, kCGWindowListExcludeDesktopElements,
+        kCGWindowListOptionOnScreenOnly,
+    },
+};
 use objc2::{rc::Retained, AnyThread};
 use objc2_app_kit::NSScreen;
 use objc2_core_foundation::CFRetained;
@@ -226,6 +234,67 @@ fn capture_display(display_id: &DisplayId) -> Result<CapturedImage, CaptureError
     })
 }
 
+fn intersection_area(first: CGRect, second: CGRect) -> f64 {
+    let left = first.origin.x.max(second.origin.x);
+    let top = first.origin.y.max(second.origin.y);
+    let right = (first.origin.x + first.size.width).min(second.origin.x + second.size.width);
+    let bottom = (first.origin.y + first.size.height).min(second.origin.y + second.size.height);
+    (right - left).max(0.0) * (bottom - top).max(0.0)
+}
+
+fn active_display_id() -> Option<DisplayId> {
+    let window_ids = create_window_list(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        0,
+    )?;
+    let windows = create_description_from_array(window_ids)?;
+    let displays = CGDisplay::active_displays().ok()?;
+    let bounds_key = CFString::from_static_string("kCGWindowBounds");
+    let layer_key = CFString::from_static_string("kCGWindowLayer");
+
+    // Core Graphics returns on-screen windows in front-to-back order. The
+    // first normal window is a useful, privacy-neutral indication of the
+    // display currently being used. Only window geometry is read; no title,
+    // owner name, or window pixels are retained.
+    for window in windows.iter() {
+        let Some(layer) = window
+            .find(&layer_key)
+            .and_then(|value| value.downcast::<core_foundation::number::CFNumber>())
+            .and_then(|value| value.to_i32())
+        else {
+            continue;
+        };
+        if layer != 0 {
+            continue;
+        }
+        let Some(bounds) = window
+            .find(&bounds_key)
+            .and_then(|value| value.downcast::<core_foundation::dictionary::CFDictionary>())
+            .and_then(|value| CGRect::from_dict_representation(&value))
+        else {
+            continue;
+        };
+        if bounds.is_empty() {
+            continue;
+        }
+
+        let mut best_display = None;
+        let mut best_area = 0.0;
+        for display_id in &displays {
+            let display_bounds = CGDisplay::new(*display_id).bounds();
+            let area = intersection_area(bounds, display_bounds);
+            if area > best_area {
+                best_area = area;
+                best_display = Some(*display_id);
+            }
+        }
+        if let Some(display_id) = best_display {
+            return Some(DisplayId(display_id.to_string()));
+        }
+    }
+    None
+}
+
 #[async_trait]
 impl ScreenCapture for PlatformCapture {
     async fn permission_state(&self) -> Result<PermissionState, CaptureError> {
@@ -257,6 +326,12 @@ impl ScreenCapture for PlatformCapture {
         tokio::task::spawn_blocking(move || capture_display(&display_id))
             .await
             .map_err(|_| CaptureError::CaptureFailed)?
+    }
+
+    async fn active_display(&self) -> Result<Option<DisplayId>, CaptureError> {
+        tokio::task::spawn_blocking(active_display_id)
+            .await
+            .map_err(|_| CaptureError::CaptureFailed)
     }
 
     async fn comparison_exclusions(
@@ -376,6 +451,24 @@ mod tests {
             }])
         );
         assert!(top_edge_exclusion(900.0, 100.0, 1440, 900).is_none());
+    }
+
+    #[test]
+    fn intersection_area_prefers_the_larger_display_overlap() {
+        let window = CGRect::new(
+            &core_graphics::geometry::CGPoint::new(900.0, 100.0),
+            &core_graphics::geometry::CGSize::new(400.0, 400.0),
+        );
+        let left = CGRect::new(
+            &core_graphics::geometry::CGPoint::new(0.0, 0.0),
+            &core_graphics::geometry::CGSize::new(1000.0, 1000.0),
+        );
+        let right = CGRect::new(
+            &core_graphics::geometry::CGPoint::new(1000.0, 0.0),
+            &core_graphics::geometry::CGSize::new(1000.0, 1000.0),
+        );
+
+        assert!(intersection_area(window, left) < intersection_area(window, right));
     }
 
     #[tokio::test]

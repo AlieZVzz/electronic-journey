@@ -62,6 +62,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(RuntimeState::default())
+        .manage(upload::UploadDiagnosticsRegistry::default())
         .setup(|app| {
             trace_startup("setup entered");
             #[cfg(target_os = "windows")]
@@ -83,6 +84,7 @@ pub fn run() {
                         .restore_settings(commands::CaptureSettings {
                             interval_minutes: settings.interval_minutes,
                             idle_pause_minutes: settings.idle_pause_minutes,
+                            capture_mode: settings.capture_mode,
                         })
                         .is_err()
                     {
