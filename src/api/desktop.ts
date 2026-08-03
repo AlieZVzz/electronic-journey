@@ -30,6 +30,7 @@ const browserSnapshot: AppSnapshot = {
   permissionState: "not_determined",
   lastError: null,
   settings: defaultCaptureSettings,
+  launchAtLogin: false,
 };
 
 function isTauriRuntime(): boolean {
@@ -115,6 +116,14 @@ export const desktopApi = {
     }
 
     return invoke<AppSnapshot>("update_capture_settings", { settings });
+  },
+
+  async setLaunchAtLogin(enabled: boolean): Promise<AppSnapshot> {
+    if (!isTauriRuntime()) {
+      throw new Error("开机自启动只能在桌面应用中设置。");
+    }
+
+    return invoke<AppSnapshot>("set_launch_at_login", { enabled });
   },
 
   async listTimelineCaptures(

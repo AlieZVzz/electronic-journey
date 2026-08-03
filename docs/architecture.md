@@ -21,6 +21,7 @@ flowchart LR
 - `capture/`：平台权限、截图适配和系统菜单栏/任务栏比较排除区域。
 - `system_monitor/`：macOS 工作区/分布式通知与 CoreGraphics 空闲时间，以及 Windows 会话/电源窗口消息与 `GetLastInputInfo`。
 - `capture_pipeline.rs`：完整像素与稳定内容去重、无损编码、原子写入、完整性回读和删除。
+- `autostart.rs`：用户级开机自启动注册；macOS 写入 LaunchAgent，Windows 写入当前用户启动注册表项。
 - `tray.rs`：从 Rust 运行摘要派生托盘状态、权限提示和操作可用性，并把操作路由回同一记录状态机。
 - `timeline/`：SQLite 时间线和受控恢复扫描。
 - `database/`：截图、远程配置和上传队列。
@@ -34,6 +35,8 @@ flowchart LR
 空闲时长由 Rust 每秒读取，阈值来自本地截图设置，0 表示关闭。平台监听无法安装或运行时读取失败会关闭记录意图、取消调度并进入可见错误状态，避免在隐私状态未知时继续采集。
 
 托盘不维护第二份记录状态。菜单文字、工具提示和按钮可用性都由 `RuntimeState` 的精简摘要生成；主窗口命令、托盘操作、系统事件、权限刷新或截图失败改变状态后，会统一刷新托盘并向主 WebView 发送 `runtime-state-changed`。托盘缺少权限时只打开主窗口并说明后续操作，不直接调用平台授权请求。主窗口关闭事件被转换为隐藏，保持托盘入口可用；托盘退出操作才终止进程。
+
+开机自启动是独立的操作系统用户级配置，不写入 SQLite。macOS 使用当前用户的 `~/Library/LaunchAgents/com.electronicjourney.app.plist`，Windows 使用 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`；启动参数使应用保持在托盘，不会自动改变记录状态。
 
 ## 上传数据流
 

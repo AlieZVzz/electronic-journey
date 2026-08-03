@@ -31,6 +31,7 @@ export interface AppSnapshot {
   permissionState: PermissionState;
   lastError: string | null;
   settings: CaptureSettings;
+  launchAtLogin: boolean;
 }
 
 export interface TimelineCapture {

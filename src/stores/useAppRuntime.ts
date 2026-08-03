@@ -23,6 +23,7 @@ interface AppRuntime {
   requestScreenCapturePermission: () => Promise<AppSnapshot>;
   setRecordingState: (state: RecordingState) => Promise<void>;
   updateSettings: (settings: CaptureSettings) => Promise<void>;
+  setLaunchAtLogin: (enabled: boolean) => Promise<void>;
 }
 
 export function useAppRuntime(): AppRuntime {
@@ -256,6 +257,26 @@ export function useAppRuntime(): AppRuntime {
     }
   }, []);
 
+  const setLaunchAtLogin = useCallback(async (enabled: boolean) => {
+    setLoading(true);
+    setPendingAction("autostart");
+    setNotice(null);
+    try {
+      setSnapshot(await desktopApi.setLaunchAtLogin(enabled));
+      setError(null);
+      setNotice(
+        enabled
+          ? "开机自启动已开启；下次登录系统时将在后台启动应用。"
+          : "开机自启动已关闭。",
+      );
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setPendingAction(null);
+      setLoading(false);
+    }
+  }, []);
+
   return {
     snapshot,
     loading,
@@ -267,5 +288,6 @@ export function useAppRuntime(): AppRuntime {
     requestScreenCapturePermission,
     setRecordingState,
     updateSettings,
+    setLaunchAtLogin,
   };
 }

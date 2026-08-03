@@ -4,6 +4,7 @@
 
 ```text
 get_app_snapshot()
+set_launch_at_login(enabled)
 set_recording_state(state)
 update_capture_settings(settings)
 list_timeline_day_selection(date_key)
@@ -16,6 +17,8 @@ request_screen_capture_permission()
 - 前端只能请求开始、暂停或停止，不能直接伪造 `suspended` 或 `degraded`；系统事件和错误状态仅由 Rust 核心产生。
 - `idlePauseMinutes` 接受 0 至 240；0 表示不因用户空闲自动暂停。
 - `update_capture_settings` 验证后将截图间隔和空闲暂停设置写入本地 SQLite；应用启动时恢复已保存值，缺失记录时才使用默认值。
+- `set_launch_at_login` 只修改当前用户的系统启动配置：macOS 使用 `~/Library/LaunchAgents`，Windows 使用当前用户的 `Run` 注册表项；`AppSnapshot.launchAtLogin` 反映当前应用路径对应的注册状态。
+- 开机启动只启动应用并进入托盘，不会自动开始截图；启动配置不进入 SQLite，也不需要管理员权限。
 - `list_timeline_day_selection` 按当前系统时区解析 `YYYY-MM-DD`，只返回当天全部截图的 ID 和大小，用于跨分页选择，不读取图片内容。
 - Rust 在主窗口之外的托盘操作或系统事件改变状态后发送 `runtime-state-changed`，事件不携带截图或状态正文；前端收到后重新调用 `get_app_snapshot`。
 

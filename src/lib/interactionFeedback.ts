@@ -1,6 +1,10 @@
 import type { CaptureSettings, RecordingState } from "../types/app";
 
-export type RuntimeAction = "permission" | "recording" | "settings";
+export type RuntimeAction =
+  | "permission"
+  | "recording"
+  | "settings"
+  | "autostart";
 
 export function recordingActionLabel(
   currentState: RecordingState,

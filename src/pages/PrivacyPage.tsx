@@ -23,21 +23,28 @@ const captureModeOptions: ReadonlyArray<{
 
 interface PrivacyPageProps {
   settings: CaptureSettings;
+  launchAtLogin: boolean;
+  launchAtLoginSupported: boolean;
   loading: boolean;
   pendingAction: RuntimeAction | null;
   onSave: (settings: CaptureSettings) => Promise<void>;
+  onLaunchAtLoginChange: (enabled: boolean) => Promise<void>;
 }
 
 export function PrivacyPage({
   settings,
+  launchAtLogin,
+  launchAtLoginSupported,
   loading,
   pendingAction,
   onSave,
+  onLaunchAtLoginChange,
 }: PrivacyPageProps) {
   const [draft, setDraft] = useState(settings);
   const errors = validateCaptureSettings(draft);
   const dirty = !captureSettingsEqual(draft, settings);
   const saving = pendingAction === "settings";
+  const updatingLaunchAtLogin = pendingAction === "autostart";
 
   return (
     <section className="placeholder-page">
@@ -103,6 +110,31 @@ export function PrivacyPage({
             value={draft.idlePauseMinutes}
           />
         </label>
+
+        <label className="toggle-row">
+          <span>
+            <strong>开机自动启动</strong>
+            <small>
+              登录 macOS 或 Windows 后在后台启动；不会自动开始截图。
+            </small>
+          </span>
+          <input
+            checked={launchAtLogin}
+            disabled={
+              loading || updatingLaunchAtLogin || !launchAtLoginSupported
+            }
+            onChange={(event) =>
+              void onLaunchAtLoginChange(event.currentTarget.checked)
+            }
+            type="checkbox"
+          />
+        </label>
+
+        {!launchAtLoginSupported && (
+          <p className="settings-panel__hint">
+            开机自启动仅支持 macOS 和 Windows 桌面应用。
+          </p>
+        )}
 
         {errors.length > 0 && (
           <ul className="form-errors">

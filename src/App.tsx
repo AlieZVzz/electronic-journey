@@ -39,6 +39,7 @@ export default function App() {
     requestScreenCapturePermission,
     setRecordingState,
     updateSettings,
+    setLaunchAtLogin,
   } = useAppRuntime();
   const visibleError = error ?? snapshot?.lastError;
   const showOnboarding =
@@ -104,7 +105,10 @@ export default function App() {
                 {activePage === "privacy" && (
                   <PrivacyPage
                     loading={loading}
+                    launchAtLogin={snapshot.launchAtLogin}
+                    launchAtLoginSupported={desktopApi.isDesktopRuntime()}
                     pendingAction={pendingAction}
+                    onLaunchAtLoginChange={setLaunchAtLogin}
                     onSave={updateSettings}
                     settings={snapshot.settings}
                   />

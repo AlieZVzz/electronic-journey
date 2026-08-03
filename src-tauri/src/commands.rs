@@ -126,6 +126,7 @@ pub struct AppSnapshot {
     permission_state: PermissionState,
     last_error: Option<String>,
     settings: CaptureSettings,
+    launch_at_login: bool,
 }
 
 impl Default for AppSnapshot {
@@ -141,6 +142,7 @@ impl Default for AppSnapshot {
             permission_state: PermissionState::NotDetermined,
             last_error: None,
             settings: CaptureSettings::default(),
+            launch_at_login: false,
         }
     }
 }
@@ -736,10 +738,24 @@ pub async fn get_app_snapshot(
         .await
         .map_err(|_| "无法验证本地截图统计，请稍后重试。".to_string())?;
     let mut snapshot = state.snapshot().map_err(|error| error.to_string())?;
+    snapshot.launch_at_login = crate::autostart::is_enabled(&app)
+        .map_err(|error| format!("无法读取开机自启动设置：{error}"))?;
     snapshot.pending_uploads = crate::database::active_upload_count(pool.inner())
         .await
         .map_err(|_| "无法读取上传任务状态。".to_string())?;
     Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn set_launch_at_login(
+    enabled: bool,
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
+    pool: State<'_, SqlitePool>,
+) -> Result<AppSnapshot, String> {
+    crate::autostart::set_enabled(&app, enabled)
+        .map_err(|error| format!("无法更新开机自启动设置：{error}"))?;
+    get_app_snapshot(app, state, pool).await
 }
 
 #[tauri::command]

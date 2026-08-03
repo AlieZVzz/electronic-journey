@@ -1,4 +1,5 @@
 mod auto_sync;
+mod autostart;
 mod capture;
 mod capture_pipeline;
 mod commands;
@@ -28,6 +29,11 @@ pub(crate) fn trace_startup(stage: &str) {
             .as_millis();
         eprintln!("startup {stage}: {elapsed} ms");
     }
+}
+
+fn launched_at_login() -> bool {
+    std::env::args_os()
+        .any(|argument| argument == std::ffi::OsStr::new(autostart::AUTOSTART_ARGUMENT))
 }
 
 fn spawn_startup_recovery(app_handle: tauri::AppHandle) {
@@ -95,6 +101,11 @@ pub fn run() {
                 Err(_) => runtime.set_settings_recovery_error(),
             }
             tray::install(app.handle())?;
+            if !launched_at_login() {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.show()?;
+                }
+            }
             system_monitor::start(app.handle());
             auto_sync::spawn_scheduler(app.handle().clone());
             trace_startup("database ready");
@@ -118,6 +129,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_snapshot,
+            commands::set_launch_at_login,
             commands::get_active_upload_batch,
             commands::get_remote_profile,
             commands::get_upload_batch_status,

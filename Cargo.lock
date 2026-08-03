@@ -1432,6 +1432,7 @@ dependencies = [
  "iana-time-zone",
  "image",
  "keyring",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
@@ -1453,6 +1454,7 @@ dependencies = [
  "uuid",
  "windows 0.61.3",
  "windows-future 0.2.1",
+ "winreg",
  "zeroize",
 ]
 

@@ -1599,6 +1599,13 @@ h1 {
   accent-color: var(--accent);
 }
 
+.settings-panel__hint {
+  margin: 10px 16px 0;
+  color: #8b9099;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .settings-panel > .button {
   justify-self: end;
   margin: 14px 16px;
@@ -2146,6 +2153,7 @@ h1 {
   .notice-card p,
   .remote-settings label > span:first-child small,
   .settings-panel .toggle-row small,
+  .settings-panel__hint,
   .check-list p,
   .onboarding-promises p,
   .permission-status p,
