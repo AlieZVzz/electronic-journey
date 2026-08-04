@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::Path, time::Duration};
 
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, FixedOffset, Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::migrate::MigrateError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -35,6 +35,8 @@ pub enum DatabaseError {
     CaptureNotFound,
     #[error("upload selection is invalid")]
     InvalidUploadSelection,
+    #[error("database contains an invalid count")]
+    InvalidCount,
     #[error("another upload batch is already active")]
     UploadAlreadyInProgress,
     #[error("database contains invalid JSON settings: {0}")]
@@ -342,6 +344,61 @@ pub async fn active_upload_count(pool: &SqlitePool) -> Result<u32, DatabaseError
     .fetch_one(pool)
     .await?;
     u32::try_from(count).map_err(|_| DatabaseError::InvalidUploadSelection)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TodayCaptureStats {
+    pub captured: u32,
+    pub uploaded: u32,
+}
+
+fn current_local_day_bounds() -> Result<(DateTime<Utc>, DateTime<Utc>), DatabaseError> {
+    let local_date = Local::now().date_naive();
+    let tomorrow = local_date.succ_opt().ok_or(DatabaseError::InvalidCount)?;
+    let start = Local
+        .from_local_datetime(
+            &local_date
+                .and_hms_opt(0, 0, 0)
+                .ok_or(DatabaseError::InvalidCount)?,
+        )
+        .earliest()
+        .ok_or(DatabaseError::InvalidCount)?;
+    let end = Local
+        .from_local_datetime(
+            &tomorrow
+                .and_hms_opt(0, 0, 0)
+                .ok_or(DatabaseError::InvalidCount)?,
+        )
+        .earliest()
+        .ok_or(DatabaseError::InvalidCount)?;
+    Ok((start.with_timezone(&Utc), end.with_timezone(&Utc)))
+}
+
+pub async fn today_capture_stats(pool: &SqlitePool) -> Result<TodayCaptureStats, DatabaseError> {
+    let (start_utc, end_utc) = current_local_day_bounds()?;
+    let (captured, uploaded): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*),
+            COUNT(DISTINCT CASE WHEN EXISTS (
+                SELECT 1
+                FROM upload_items
+                WHERE upload_items.capture_id = captures.id
+                  AND upload_items.state = 'uploaded'
+            ) THEN captures.id END)
+        FROM captures
+        WHERE captured_at_utc >= ? AND captured_at_utc < ?
+        "#,
+    )
+    .bind(start_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    .bind(end_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    .fetch_one(pool)
+    .await?;
+
+    Ok(TodayCaptureStats {
+        captured: u32::try_from(captured).map_err(|_| DatabaseError::InvalidCount)?,
+        uploaded: u32::try_from(uploaded).map_err(|_| DatabaseError::InvalidCount)?,
+    })
 }
 
 #[derive(Debug, FromRow)]
@@ -1214,6 +1271,45 @@ mod tests {
         assert_eq!(records[0].local_path, capture.local_path);
         assert_eq!(records[0].thumbnail_path.as_deref(), capture.thumbnail_path);
         assert_eq!(records[0].file_size, 42);
+    }
+
+    #[tokio::test]
+    async fn today_capture_stats_counts_distinct_uploaded_images() {
+        let pool = migrated_memory_pool().await;
+        save_test_remote_profile(&pool).await;
+        let (today_start, _) = current_local_day_bounds().unwrap();
+
+        let first_id = Uuid::new_v4();
+        let mut first = record(first_id, today_start + chrono::Duration::minutes(1));
+        first.local_path = "captures/today-first.webp";
+        insert_capture(&pool, &first).await.unwrap();
+
+        let second_id = Uuid::new_v4();
+        let mut second = record(second_id, today_start + chrono::Duration::minutes(2));
+        second.local_path = "captures/today-second.webp";
+        insert_capture(&pool, &second).await.unwrap();
+
+        let previous_id = Uuid::new_v4();
+        let mut previous = record(previous_id, today_start - chrono::Duration::minutes(1));
+        previous.local_path = "captures/previous.webp";
+        insert_capture(&pool, &previous).await.unwrap();
+
+        let batch = create_upload_batch(&pool, "primary", &[first_id], "manual")
+            .await
+            .unwrap();
+        let item = upload_batch_items(&pool, batch.id).await.unwrap().remove(0);
+        set_upload_item_state(&pool, &item.id, "uploaded", None)
+            .await
+            .unwrap();
+        finish_upload_batch(&pool, batch.id, 1, 0).await.unwrap();
+
+        assert_eq!(
+            today_capture_stats(&pool).await.unwrap(),
+            TodayCaptureStats {
+                captured: 2,
+                uploaded: 1,
+            }
+        );
     }
 
     #[tokio::test]

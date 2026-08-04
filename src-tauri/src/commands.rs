@@ -719,6 +719,9 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
             } else {
                 runtime.capture_skipped(generation)
             };
+            if stored_any {
+                crate::tray::refresh(&app);
+            }
             let Some(next_delay) = next_delay else {
                 return;
             };
@@ -949,6 +952,7 @@ pub async fn delete_timeline_capture(
     let deletion =
         capture_pipeline::delete_saved_capture(&app, pool.inner(), capture_id, &record).await;
     let _ = refresh_local_inventory(&app, true).await;
+    crate::tray::refresh(&app);
     match deletion {
         Ok(()) => Ok(()),
         Err(capture_pipeline::CapturePipelineError::CaptureUploadInProgress) => {
@@ -1351,6 +1355,7 @@ pub(crate) async fn run_upload_batch(
                 crate::database::set_upload_item_state(&pool, &item.id, "uploaded", None)
                     .await
                     .map_err(|_| ())?;
+                crate::tray::refresh(&app);
             }
             Err(error) => {
                 failed_items += 1;

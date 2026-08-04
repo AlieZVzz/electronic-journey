@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIcon, TrayIconBuilder},
@@ -8,11 +10,14 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use crate::{
     capture::PermissionState,
     commands::{self, RecordingState, RuntimeState, RuntimeSummary, SuspensionReason},
+    database,
     error::AppError,
 };
 
 const STATUS_ID: &str = "tray-status";
 const PERMISSION_ID: &str = "tray-permission";
+const TODAY_CAPTURED_ID: &str = "tray-today-captured";
+const TODAY_UPLOADED_ID: &str = "tray-today-uploaded";
 const START_ID: &str = "tray-start";
 const PAUSE_ID: &str = "tray-pause";
 const STOP_ID: &str = "tray-stop";
@@ -23,6 +28,9 @@ pub struct TrayState {
     _icon: TrayIcon,
     status: MenuItem<tauri::Wry>,
     permission: MenuItem<tauri::Wry>,
+    today_captured: MenuItem<tauri::Wry>,
+    today_uploaded: MenuItem<tauri::Wry>,
+    stats_refresh_generation: AtomicU64,
     start: MenuItem<tauri::Wry>,
     pause: MenuItem<tauri::Wry>,
     stop: MenuItem<tauri::Wry>,
@@ -37,6 +45,14 @@ struct TrayPresentation {
     start_enabled: bool,
     pause_enabled: bool,
     stop_enabled: bool,
+}
+
+fn today_captured_label(count: u32) -> String {
+    format!("今日截图：{count} 张")
+}
+
+fn today_uploaded_label(count: u32) -> String {
+    format!("今日已上传：{count} 张")
 }
 
 impl TrayPresentation {
@@ -100,6 +116,20 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         presentation.permission_action_enabled,
         None::<&str>,
     )?;
+    let today_captured = MenuItem::with_id(
+        app,
+        TODAY_CAPTURED_ID,
+        "今日截图：读取中…",
+        false,
+        None::<&str>,
+    )?;
+    let today_uploaded = MenuItem::with_id(
+        app,
+        TODAY_UPLOADED_ID,
+        "今日已上传：读取中…",
+        false,
+        None::<&str>,
+    )?;
     let start = MenuItem::with_id(
         app,
         START_ID,
@@ -131,6 +161,8 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         &[
             &status,
             &permission,
+            &today_captured,
+            &today_uploaded,
             &separator_one,
             &start,
             &pause,
@@ -162,10 +194,14 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         _icon: icon,
         status,
         permission,
+        today_captured,
+        today_uploaded,
+        stats_refresh_generation: AtomicU64::new(0),
         start,
         pause,
         stop,
     });
+    refresh(app);
     Ok(())
 }
 
@@ -187,6 +223,35 @@ pub fn refresh(app: &AppHandle) {
     let _ = tray.pause.set_enabled(presentation.pause_enabled);
     let _ = tray.stop.set_enabled(presentation.stop_enabled);
     let _ = tray._icon.set_tooltip(Some(&presentation.tooltip));
+
+    let generation = tray.stats_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let pool = app.state::<sqlx::SqlitePool>().inner().clone();
+        let Some(tray) = app.try_state::<TrayState>() else {
+            return;
+        };
+        if tray.stats_refresh_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let stats = match database::today_capture_stats(&pool).await {
+            Ok(stats) => stats,
+            Err(_) => {
+                let _ = tray.today_captured.set_text("今日截图：暂不可用");
+                let _ = tray.today_uploaded.set_text("今日已上传：暂不可用");
+                return;
+            }
+        };
+        if tray.stats_refresh_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let _ = tray
+            .today_captured
+            .set_text(&today_captured_label(stats.captured));
+        let _ = tray
+            .today_uploaded
+            .set_text(&today_uploaded_label(stats.uploaded));
+    });
 }
 
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
@@ -309,5 +374,11 @@ mod tests {
         assert!(presentation.permission_action_enabled);
         assert!(presentation.start_enabled);
         assert!(presentation.tooltip.contains("需要屏幕录制权限"));
+    }
+
+    #[test]
+    fn today_stats_use_explicit_count_labels() {
+        assert_eq!(today_captured_label(12), "今日截图：12 张");
+        assert_eq!(today_uploaded_label(7), "今日已上传：7 张");
     }
 }
