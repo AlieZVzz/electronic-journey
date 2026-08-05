@@ -45,6 +45,10 @@
       "icons/icon.ico"
     ],
     "shortDescription": "Your local digital journey archive",
-    "longDescription": "A local-first desktop application that captures and organizes your own digital journey."
+    "longDescription": "A local-first desktop application that captures and organizes your own digital journey.",
+    "macOS": {
+      "minimumSystemVersion": "15.0",
+      "signingIdentity": "-"
+    }
   }
 }

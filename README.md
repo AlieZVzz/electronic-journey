@@ -66,6 +66,37 @@ tccutil reset ScreenCapture com.electronicjourney.app
 scripts/check.sh
 ```
 
+## 自动构建与打包
+
+GitHub Actions 会在推送到 `main` 或创建 Pull Request 时运行前端检查，
+并分别在 macOS 与 Windows 上编译和测试 Rust workspace。
+
+推送与应用版本一致的标签会自动构建三个桌面安装包，并创建 Draft Release：
+
+- `macOS Apple Silicon`：DMG
+- `macOS Intel`：DMG
+- `Windows x64`：MSI 与 NSIS 安装程序
+
+例如当前版本为 `0.1.1` 时：
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+也可以从 GitHub Actions 的 **Package desktop apps** 页面手动触发构建。
+手动构建只保存 workflow artifacts，不创建 Release。
+
+macOS 未配置 Apple 开发者证书时使用 ad-hoc 签名，适合内部测试。
+正式分发前应在仓库 Actions Secrets 中配置
+`APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、
+`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD` 与
+`APPLE_TEAM_ID`，让 Tauri 完成 Developer ID 签名和公证。
+Windows 安装包当前未进行 Authenticode 签名；公开发布前仍需接入可信代码签名证书。
+
+应用版本必须同时更新 `package.json`、`package-lock.json`、
+`src-tauri/tauri.conf.json` 和根目录 `Cargo.toml`。CI 会检查它们以及发布标签是否一致。
+
 ## 项目结构
 
 ```text
