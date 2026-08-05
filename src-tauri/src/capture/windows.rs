@@ -427,7 +427,7 @@ impl ScreenCapture for PlatformCapture {
 
     async fn active_display(&self) -> Result<Option<DisplayId>, CaptureError> {
         let foreground_window = unsafe { GetForegroundWindow() };
-        if foreground_window.0 == 0 {
+        if foreground_window.0.is_null() {
             return Ok(None);
         }
         let monitor = unsafe { MonitorFromWindow(foreground_window, MONITOR_DEFAULTTONEAREST) };
