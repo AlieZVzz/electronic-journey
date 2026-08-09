@@ -66,16 +66,39 @@ jobs:
         run: npm run check:version -- "$RELEASE_TAG"
         shell: bash
 
+      - name: Configure optional Apple signing
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_SECRET: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD_SECRET: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY_SECRET: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD_SECRET: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -n "$APPLE_CERTIFICATE_SECRET" ]]; then
+            printf 'APPLE_CERTIFICATE=%s\n' "$APPLE_CERTIFICATE_SECRET" >> "$GITHUB_ENV"
+
+            if [[ -n "$APPLE_CERTIFICATE_PASSWORD_SECRET" ]]; then
+              printf 'APPLE_CERTIFICATE_PASSWORD=%s\n' "$APPLE_CERTIFICATE_PASSWORD_SECRET" >> "$GITHUB_ENV"
+            fi
+
+            if [[ -n "$APPLE_SIGNING_IDENTITY_SECRET" ]]; then
+              printf 'APPLE_SIGNING_IDENTITY=%s\n' "$APPLE_SIGNING_IDENTITY_SECRET" >> "$GITHUB_ENV"
+            fi
+          fi
+
+          if [[ -n "$APPLE_ID_SECRET" && -n "$APPLE_PASSWORD_SECRET" && -n "$APPLE_TEAM_ID_SECRET" ]]; then
+            printf 'APPLE_ID=%s\n' "$APPLE_ID_SECRET" >> "$GITHUB_ENV"
+            printf 'APPLE_PASSWORD=%s\n' "$APPLE_PASSWORD_SECRET" >> "$GITHUB_ENV"
+            printf 'APPLE_TEAM_ID=%s\n' "$APPLE_TEAM_ID_SECRET" >> "$GITHUB_ENV"
+          fi
+
       - name: Build desktop packages
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && 'Electronic Journey v__VERSION__' || '' }}
