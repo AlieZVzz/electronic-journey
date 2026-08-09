@@ -344,7 +344,7 @@ fn install_panel_window(app: &AppHandle) -> tauri::Result<()> {
     .transparent(true)
     .always_on_top(true)
     .skip_taskbar(true)
-    .shadow(true)
+    .shadow(false)
     .focused(false)
     .visible(false)
     .build()?;
