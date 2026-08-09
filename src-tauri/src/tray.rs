@@ -1,18 +1,26 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(not(target_os = "windows"))]
+use tauri::menu::{Menu, PredefinedMenuItem};
+#[cfg(target_os = "windows")]
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::MenuItem,
     tray::{TrayIcon, TrayIconBuilder},
     AppHandle, Emitter, Manager,
 };
+#[cfg(target_os = "windows")]
+use tauri::{PhysicalPosition, PhysicalSize};
+#[cfg(not(target_os = "windows"))]
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 use crate::{
     capture::PermissionState,
-    commands::{self, RecordingState, RuntimeState, RuntimeSummary, SuspensionReason},
+    commands::{RecordingState, RuntimeState, RuntimeSummary, SuspensionReason},
     database,
-    error::AppError,
 };
+#[cfg(not(target_os = "windows"))]
+use crate::{commands, error::AppError};
 
 const STATUS_ID: &str = "tray-status";
 const PERMISSION_ID: &str = "tray-permission";
@@ -21,8 +29,16 @@ const TODAY_UPLOADED_ID: &str = "tray-today-uploaded";
 const START_ID: &str = "tray-start";
 const PAUSE_ID: &str = "tray-pause";
 const STOP_ID: &str = "tray-stop";
+#[cfg(not(target_os = "windows"))]
 const OPEN_ID: &str = "tray-open";
+#[cfg(not(target_os = "windows"))]
 const QUIT_ID: &str = "tray-quit";
+#[cfg(target_os = "windows")]
+const PANEL_LABEL: &str = "tray-panel";
+#[cfg(target_os = "windows")]
+const PANEL_WIDTH: f64 = 360.0;
+#[cfg(target_os = "windows")]
+const PANEL_HEIGHT: f64 = 440.0;
 
 pub struct TrayState {
     _icon: TrayIcon,
@@ -45,6 +61,16 @@ struct TrayPresentation {
     start_enabled: bool,
     pause_enabled: bool,
     stop_enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraySnapshot {
+    state: RecordingState,
+    suspension_reason: Option<SuspensionReason>,
+    permission_state: PermissionState,
+    today_captured: u32,
+    today_uploaded: u32,
 }
 
 fn today_captured_label(count: u32) -> String {
@@ -99,6 +125,9 @@ impl TrayPresentation {
 }
 
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
+    #[cfg(target_os = "windows")]
+    install_panel_window(app)?;
+
     let summary = app
         .state::<RuntimeState>()
         .summary()
@@ -151,33 +180,48 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         presentation.stop_enabled,
         None::<&str>,
     )?;
+    #[cfg(not(target_os = "windows"))]
     let open = MenuItem::with_id(app, OPEN_ID, "打开主窗口", true, None::<&str>)?;
+    #[cfg(not(target_os = "windows"))]
     let quit = MenuItem::with_id(app, QUIT_ID, "退出 Electronic Journey", true, None::<&str>)?;
-    let separator_one = PredefinedMenuItem::separator(app)?;
-    let separator_two = PredefinedMenuItem::separator(app)?;
-    let separator_three = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &status,
-            &permission,
-            &today_captured,
-            &today_uploaded,
-            &separator_one,
-            &start,
-            &pause,
-            &stop,
-            &separator_two,
-            &open,
-            &separator_three,
-            &quit,
-        ],
-    )?;
+    #[cfg(not(target_os = "windows"))]
+    let menu = {
+        let separator_one = PredefinedMenuItem::separator(app)?;
+        let separator_two = PredefinedMenuItem::separator(app)?;
+        let separator_three = PredefinedMenuItem::separator(app)?;
+        Menu::with_items(
+            app,
+            &[
+                &status,
+                &permission,
+                &today_captured,
+                &today_uploaded,
+                &separator_one,
+                &start,
+                &pause,
+                &stop,
+                &separator_two,
+                &open,
+                &separator_three,
+                &quit,
+            ],
+        )?
+    };
 
     let mut builder = TrayIconBuilder::with_id("electronic-journey-tray")
-        .menu(&menu)
         .tooltip(&presentation.tooltip)
-        .on_menu_event(handle_menu_event);
+        .show_menu_on_left_click(false);
+
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder
+            .on_tray_icon_event(|tray, event| handle_tray_icon_event(tray.app_handle(), event));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        builder = builder.menu(&menu).on_menu_event(handle_menu_event);
+    }
 
     #[cfg(target_os = "macos")]
     {
@@ -206,7 +250,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 }
 
 pub fn refresh(app: &AppHandle) {
-    let _ = app.emit_to("main", "runtime-state-changed", ());
+    let _ = app.emit("runtime-state-changed", ());
     let Some(tray) = app.try_state::<TrayState>() else {
         return;
     };
@@ -254,6 +298,121 @@ pub fn refresh(app: &AppHandle) {
     });
 }
 
+#[tauri::command]
+pub async fn get_tray_snapshot(
+    app: AppHandle,
+    pool: tauri::State<'_, sqlx::SqlitePool>,
+) -> Result<TraySnapshot, String> {
+    let summary = app
+        .state::<RuntimeState>()
+        .summary()
+        .map_err(|error| error.to_string())?;
+    let stats = database::today_capture_stats(pool.inner())
+        .await
+        .map_err(|_| "无法读取今日统计。".to_string())?;
+
+    Ok(TraySnapshot {
+        state: summary.state,
+        suspension_reason: summary.suspension_reason,
+        permission_state: summary.permission_state,
+        today_captured: stats.captured,
+        today_uploaded: stats.uploaded,
+    })
+}
+
+#[tauri::command]
+pub fn open_main_window_from_tray(app: AppHandle) {
+    show_main_window(&app);
+}
+
+#[tauri::command]
+pub fn quit_from_tray(app: AppHandle) {
+    app.exit(0);
+}
+
+#[cfg(target_os = "windows")]
+fn install_panel_window(app: &AppHandle) -> tauri::Result<()> {
+    tauri::WebviewWindowBuilder::new(
+        app,
+        PANEL_LABEL,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("Electronic Journey")
+    .inner_size(PANEL_WIDTH, PANEL_HEIGHT)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    .focused(false)
+    .visible(false)
+    .build()?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn handle_tray_icon_event(app: &AppHandle, event: TrayIconEvent) {
+    if let TrayIconEvent::Click {
+        position,
+        button: MouseButton::Right,
+        button_state: MouseButtonState::Up,
+        ..
+    } = event
+    {
+        show_panel_at(app, position);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn show_panel_at(app: &AppHandle, pointer: PhysicalPosition<f64>) {
+    let Some(window) = app.get_webview_window(PANEL_LABEL) else {
+        return;
+    };
+    let Ok(panel_size) = window.outer_size() else {
+        return;
+    };
+    let Ok(Some(monitor)) = window.monitor_from_point(pointer.x, pointer.y) else {
+        return;
+    };
+    let position = panel_position(pointer, panel_size, *monitor.position(), *monitor.size());
+    let _ = window.set_position(position);
+    let _ = window.show();
+    let _ = window.set_focus();
+    let _ = app.emit_to(PANEL_LABEL, "tray-panel-opened", ());
+}
+
+#[cfg(target_os = "windows")]
+fn panel_position(
+    pointer: PhysicalPosition<f64>,
+    panel: PhysicalSize<u32>,
+    monitor_position: PhysicalPosition<i32>,
+    monitor_size: PhysicalSize<u32>,
+) -> PhysicalPosition<i32> {
+    const GAP: f64 = 10.0;
+    let left = f64::from(monitor_position.x);
+    let top = f64::from(monitor_position.y);
+    let right = left + f64::from(monitor_size.width);
+    let bottom = top + f64::from(monitor_size.height);
+    let panel_width = f64::from(panel.width);
+    let panel_height = f64::from(panel.height);
+    let x = if pointer.x > left + f64::from(monitor_size.width) / 2.0 {
+        pointer.x - panel_width
+    } else {
+        pointer.x
+    }
+    .clamp(left + GAP, (right - panel_width - GAP).max(left + GAP));
+    let y = if pointer.y > top + f64::from(monitor_size.height) / 2.0 {
+        pointer.y - panel_height - GAP
+    } else {
+        pointer.y + GAP
+    }
+    .clamp(top + GAP, (bottom - panel_height - GAP).max(top + GAP));
+
+    PhysicalPosition::new(x.round() as i32, y.round() as i32)
+}
+
+#[cfg(not(target_os = "windows"))]
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
         START_ID => match commands::apply_recording_state(app, RecordingState::Running) {
@@ -288,6 +447,7 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn show_permission_prompt(app: &AppHandle) {
     show_main_window(app);
     app.dialog()
@@ -299,6 +459,7 @@ fn show_permission_prompt(app: &AppHandle) {
         .show(|_| {});
 }
 
+#[cfg(not(target_os = "windows"))]
 fn show_action_error(app: &AppHandle, error: &AppError) {
     show_main_window(app);
     let message = match error {
@@ -380,5 +541,31 @@ mod tests {
     fn today_stats_use_explicit_count_labels() {
         assert_eq!(today_captured_label(12), "今日截图：12 张");
         assert_eq!(today_uploaded_label(7), "今日已上传：7 张");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn panel_position_opens_above_a_bottom_right_tray() {
+        let position = panel_position(
+            PhysicalPosition::new(1900.0, 1060.0),
+            PhysicalSize::new(360, 500),
+            PhysicalPosition::new(0, 0),
+            PhysicalSize::new(1920, 1080),
+        );
+
+        assert_eq!(position, PhysicalPosition::new(1540, 550));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn panel_position_stays_inside_a_negative_origin_monitor() {
+        let position = panel_position(
+            PhysicalPosition::new(-1900.0, 10.0),
+            PhysicalSize::new(360, 500),
+            PhysicalPosition::new(-1920, 0),
+            PhysicalSize::new(1920, 1080),
+        );
+
+        assert_eq!(position, PhysicalPosition::new(-1900, 20));
     }
 }

@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Minimal permissions for the Electronic Journey main window.",
-  "windows": ["main"],
+  "description": "Minimal permissions for the Electronic Journey application windows.",
+  "windows": ["main", "tray-panel"],
   "permissions": [
     "core:app:default",
     "core:event:default",

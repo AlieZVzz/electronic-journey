@@ -126,6 +126,19 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
+            #[cfg(target_os = "windows")]
+            if window.label() == "tray-panel" {
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    tauri::WindowEvent::Focused(false) => {
+                        let _ = window.hide();
+                    }
+                    _ => {}
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_snapshot,
@@ -148,6 +161,9 @@ pub fn run() {
             commands::test_remote_profile,
             commands::update_capture_settings,
             commands::upload_selected_captures,
+            tray::get_tray_snapshot,
+            tray::open_main_window_from_tray,
+            tray::quit_from_tray,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Electronic Journey");

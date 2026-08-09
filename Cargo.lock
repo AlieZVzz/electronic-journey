@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "electronic-journey-desktop"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "block2",
@@ -1460,7 +1460,7 @@ dependencies = [
 
 [[package]]
 name = "electronic-journey-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
