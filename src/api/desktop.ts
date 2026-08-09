@@ -7,6 +7,7 @@ import type {
   RecordingState,
   TimelinePageResult,
   TimelineSelectionItem,
+  TraySnapshot,
   RemoteConnectionTest,
   RemoteProfile,
   SaveRemoteProfileInput,
@@ -62,6 +63,31 @@ export const desktopApi = {
     }
 
     return invoke<AppSnapshot>("get_app_snapshot");
+  },
+
+  async getTraySnapshot(): Promise<TraySnapshot> {
+    if (!isTauriRuntime()) {
+      return {
+        state: browserSnapshot.state,
+        suspensionReason: browserSnapshot.suspensionReason,
+        permissionState: browserSnapshot.permissionState,
+        todayCaptured: browserSnapshot.todayCount,
+        todayUploaded: 0,
+      };
+    }
+    return invoke<TraySnapshot>("get_tray_snapshot");
+  },
+
+  async openMainWindowFromTray(): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke<void>("open_main_window_from_tray");
+    }
+  },
+
+  async quitFromTray(): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke<void>("quit_from_tray");
+    }
   },
 
   async refreshScreenCapturePermission(): Promise<AppSnapshot> {

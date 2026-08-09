@@ -34,6 +34,14 @@ export interface AppSnapshot {
   launchAtLogin: boolean;
 }
 
+export interface TraySnapshot {
+  state: RecordingState;
+  suspensionReason: SuspensionReason | null;
+  permissionState: PermissionState;
+  todayCaptured: number;
+  todayUploaded: number;
+}
+
 export interface TimelineCapture {
   id: string;
   capturedAtUtc: string;
