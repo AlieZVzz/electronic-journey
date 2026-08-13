@@ -35,6 +35,8 @@ test_remote_profile()
 upload_selected_captures(capture_ids)
 get_upload_batch_status(batch_id)
 get_active_upload_batch()
+retry_failed_upload_items(batch_id)
+cancel_upload_batch(batch_id)
 sync_today_now()
 ```
 
@@ -46,6 +48,8 @@ sync_today_now()
 - `upload_selected_captures` 只接受 1 至 500 个截图 UUID；Rust 从 SQLite 获取受控本地路径和确定性远端路径，创建后台批次后立即返回，不等待 SFTP 完成。
 - `get_upload_batch_status` 返回批次状态、实时成功/失败数量、逐项状态、脱敏错误，以及仅存在于当前应用进程的聚合性能诊断：当前阶段、已上传字节、平均速率、预计剩余时间、连接/认证/SFTP 初始化/本地校验/传输耗时和远端元数据操作次数与耗时。诊断不包含路径、摘要、图片内容或凭据。
 - `get_active_upload_batch` 用于页面重新进入后恢复进度跟踪；同一时刻只允许一个 `pending` 或 `uploading` 批次。
+- `retry_failed_upload_items` 只读取指定批次中状态为 `failed` 的截图，并为它们创建新的手动上传批次；原批次历史不被改写。
+- `cancel_upload_batch` 将尚未开始的项目标记为 `cancelled` 并结束批次；已经处于传输中的单项允许完成后记录真实的 `uploaded` 或 `failed` 状态。
 - `sync_today_now` 仅在用户已显式启用自动同步且计划未因安全错误暂停时创建当天同步任务；截图范围完全由 Rust 从 SQLite 筛选。
 
 前端不能传入图片本地路径、远端最终文件名、任意 shell 命令、私钥正文、Hermes 配置、提示词或模型参数。浏览器 fallback 对读取指纹、保存、测试和上传均必须明确失败，不能模拟成功。

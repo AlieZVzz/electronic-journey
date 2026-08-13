@@ -67,6 +67,8 @@ function uploadStateLabel(state: TimelineCapture["uploadState"]): string | null 
       return "已上传";
     case "failed":
       return "上传失败";
+    case "cancelled":
+      return "已取消上传";
     default:
       return null;
   }
@@ -168,6 +170,9 @@ export function TimelinePage() {
   const [uploadConfirmation, setUploadConfirmation] =
     useState<UploadConfirmation | null>(null);
   const [startingUpload, setStartingUpload] = useState(false);
+  const [uploadAction, setUploadAction] = useState<
+    "retrying" | "cancelling" | null
+  >(null);
   const [previewScale, setPreviewScale] = useState<
     "fit" | "pixel" | number
   >("fit");
@@ -396,7 +401,9 @@ export function TimelinePage() {
             return;
           }
           setUploadMessage(
-            progress.failedItems === 0
+            progress.state === "cancelled"
+              ? `后台上传已取消：${progress.uploadedItems} 张已完成，剩余项目未继续上传。`
+              : progress.failedItems === 0
               ? `后台上传完成：已验证上传 ${progress.uploadedItems} 张原图。`
               : `后台上传完成：${progress.uploadedItems} 张成功，${progress.failedItems} 张失败。${
                   progress.lastError ? ` ${progress.lastError}` : ""
@@ -721,6 +728,66 @@ export function TimelinePage() {
     }
   }
 
+  async function retryFailedUploadItems() {
+    if (
+      !uploadProgress ||
+      uploadActive ||
+      uploadProgress.failedItems === 0 ||
+      uploadAction !== null
+    ) {
+      return;
+    }
+    setUploadAction("retrying");
+    setError(null);
+    try {
+      const progress = await desktopApi.retryFailedUploadItems(
+        uploadProgress.batchId,
+      );
+      setUploadProgress(progress);
+      applyUploadProgress(progress);
+      setUploadMessage(activeUploadProgressMessage(progress));
+      window.dispatchEvent(
+        new Event("electronic-journey:snapshot-changed"),
+      );
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setUploadAction(null);
+    }
+  }
+
+  async function cancelActiveUpload() {
+    if (!uploadProgress || !uploadActive || uploadAction !== null) {
+      return;
+    }
+    if (
+      !window.confirm(
+        "取消后台上传？尚未开始的项目会停止，当前正在传输的项目可能完成。",
+      )
+    ) {
+      return;
+    }
+    setUploadAction("cancelling");
+    setError(null);
+    try {
+      const progress = await desktopApi.cancelUploadBatch(
+        uploadProgress.batchId,
+      );
+      setUploadProgress(progress);
+      applyUploadProgress(progress);
+      setUploadMessage(
+        `后台上传已取消：${progress.uploadedItems} 张已完成，剩余项目未继续上传。`,
+      );
+      window.dispatchEvent(
+        new Event("electronic-journey:snapshot-changed"),
+      );
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setUploadAction(null);
+    }
+  }
+
   return (
     <section className="timeline-page">
       <header className="page-header timeline-header">
@@ -954,6 +1021,28 @@ export function TimelinePage() {
                 <strong>{uploadMessage}</strong>
                 {uploadDiagnostics && <small>{uploadDiagnostics}</small>}
               </span>
+              {uploadActive && (
+                <button
+                  className="upload-progress-toast__action"
+                  disabled={uploadAction !== null}
+                  onClick={() => void cancelActiveUpload()}
+                  type="button"
+                >
+                  {uploadAction === "cancelling" ? "正在取消…" : "取消上传"}
+                </button>
+              )}
+              {!uploadActive && (uploadProgress?.failedItems ?? 0) > 0 && (
+                <button
+                  className="upload-progress-toast__action"
+                  disabled={uploadAction !== null}
+                  onClick={() => void retryFailedUploadItems()}
+                  type="button"
+                >
+                  {uploadAction === "retrying"
+                    ? "正在重试…"
+                    : `重试失败项（${uploadProgress?.failedItems ?? 0}）`}
+                </button>
+              )}
               {!uploadActive && (
                 <button
                   aria-label="关闭上传提示"

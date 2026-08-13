@@ -148,6 +148,8 @@ pub fn run() {
             commands::test_remote_profile,
             commands::update_capture_settings,
             commands::upload_selected_captures,
+            commands::retry_failed_upload_items,
+            commands::cancel_upload_batch,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Electronic Journey");

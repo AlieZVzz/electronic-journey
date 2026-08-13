@@ -247,4 +247,20 @@ export const desktopApi = {
     }
     return invoke<UploadBatchProgress | null>("get_active_upload_batch");
   },
+
+  async retryFailedUploadItems(batchId: string): Promise<UploadBatchProgress> {
+    if (!isTauriRuntime()) {
+      throw new Error("失败的上传项目只能在桌面应用中重试。");
+    }
+    return invoke<UploadBatchProgress>("retry_failed_upload_items", {
+      batchId,
+    });
+  },
+
+  async cancelUploadBatch(batchId: string): Promise<UploadBatchProgress> {
+    if (!isTauriRuntime()) {
+      throw new Error("后台上传只能在桌面应用中取消。");
+    }
+    return invoke<UploadBatchProgress>("cancel_upload_batch", { batchId });
+  },
 };

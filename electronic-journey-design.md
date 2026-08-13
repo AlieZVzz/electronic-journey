@@ -233,6 +233,8 @@ SFTP v3 不提供通用远端 SHA-256，因此第一期验证传输前本地 SHA
 - `upload_selected_captures(capture_ids)`：创建后台批次并立即返回批次状态；
 - `get_upload_batch_status(batch_id)`：读取指定批次及逐项进度；
 - `get_active_upload_batch()`：恢复当前活动批次的界面跟踪。
+- `retry_failed_upload_items(batch_id)`：只为指定批次的失败项目创建新的手动上传批次；
+- `cancel_upload_batch(batch_id)`：取消尚未开始的项目；当前正在传输的项目完成后记录真实结果。
 - `sync_today_now()`：仅在自动同步已启用且未暂停时，明确触发当天未同步图片的后台同步。
 - `set_launch_at_login(enabled)`：设置当前用户的开机自启动，并返回包含 `launchAtLogin` 的运行快照。
 

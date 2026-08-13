@@ -1022,6 +1022,20 @@ h1 {
   line-height: 1;
 }
 
+.upload-progress-toast__action {
+  flex: 0 0 auto;
+  padding: 5px 8px !important;
+  color: #276849 !important;
+  border: 1px solid rgba(39, 104, 73, 0.28) !important;
+  border-radius: 7px;
+  font-size: 11px !important;
+  line-height: 1.2 !important;
+}
+
+.upload-progress-toast__action:disabled {
+  opacity: 0.65;
+}
+
 .upload-progress-toast.is-warning {
   color: #8b5b15;
   background: rgba(255, 249, 235, 0.98);
@@ -1030,6 +1044,11 @@ h1 {
 
 .upload-progress-toast.is-warning small {
   color: rgba(139, 91, 21, 0.78);
+}
+
+.upload-progress-toast.is-warning .upload-progress-toast__action {
+  color: #8b5b15 !important;
+  border-color: rgba(139, 91, 21, 0.32) !important;
 }
 
 @media (max-width: 720px) {

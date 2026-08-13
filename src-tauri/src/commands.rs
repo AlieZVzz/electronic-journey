@@ -1271,6 +1271,16 @@ pub(crate) async fn run_upload_batch(
     crate::database::start_upload_batch(&pool, batch_id)
         .await
         .map_err(|_| ())?;
+    if crate::database::upload_batch_is_cancelled(&pool, batch_id)
+        .await
+        .map_err(|_| ())?
+    {
+        return Ok(UploadRunResult {
+            uploaded_items: 0,
+            failed_items: 0,
+            fatal_error_code: None,
+        });
+    }
     let items = crate::database::upload_batch_items(&pool, batch_id)
         .await
         .map_err(|_| ())?;
@@ -1303,6 +1313,12 @@ pub(crate) async fn run_upload_batch(
     let mut uploaded_items = 0_usize;
     let mut failed_items = 0_usize;
     for item in items {
+        if crate::database::upload_batch_is_cancelled(&pool, batch_id)
+            .await
+            .map_err(|_| ())?
+        {
+            break;
+        }
         crate::database::set_upload_item_state(&pool, &item.id, "uploading", None)
             .await
             .map_err(|_| ())?;
@@ -1348,6 +1364,9 @@ pub(crate) async fn run_upload_batch(
         } else {
             Err(upload::UploadError::InvalidCapture)
         };
+        let cancelled = crate::database::upload_batch_is_cancelled(&pool, batch_id)
+            .await
+            .map_err(|_| ())?;
         match item_result {
             Ok(()) => {
                 uploaded_items += 1;
@@ -1370,17 +1389,41 @@ pub(crate) async fn run_upload_batch(
                 .map_err(|_| ())?;
             }
         }
+        if cancelled {
+            break;
+        }
     }
     session.disconnect().await;
-    crate::database::finish_upload_batch(&pool, batch_id, uploaded_items, failed_items)
+    if !crate::database::upload_batch_is_cancelled(&pool, batch_id)
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| ())?
+    {
+        crate::database::finish_upload_batch(&pool, batch_id, uploaded_items, failed_items)
+            .await
+            .map_err(|_| ())?;
+    }
     diagnostics.finish(batch_id, failed_items > 0);
     Ok(UploadRunResult {
         uploaded_items,
         failed_items,
         fatal_error_code: None,
     })
+}
+
+fn spawn_upload_batch(
+    app: AppHandle,
+    pool: SqlitePool,
+    profile: crate::database::RemoteProfileRecord,
+    batch_id: uuid::Uuid,
+) {
+    tauri::async_runtime::spawn(async move {
+        if run_upload_batch(app, pool.clone(), profile, batch_id)
+            .await
+            .is_err()
+        {
+            let _ = crate::database::fail_active_upload_batch(&pool, batch_id, "internal").await;
+        }
+    });
 }
 
 #[tauri::command]
@@ -1423,18 +1466,71 @@ pub async fn upload_selected_captures(
     })?;
     let progress = load_upload_progress(pool.inner(), batch.id, diagnostics.inner()).await?;
     diagnostics.begin(batch.id, progress.total_bytes);
-    let background_pool = pool.inner().clone();
-    tauri::async_runtime::spawn(async move {
-        if run_upload_batch(app, background_pool.clone(), profile, batch.id)
-            .await
-            .is_err()
-        {
-            let _ =
-                crate::database::fail_active_upload_batch(&background_pool, batch.id, "internal")
-                    .await;
-        }
-    });
+    spawn_upload_batch(app, pool.inner().clone(), profile, batch.id);
     Ok(progress)
+}
+
+#[tauri::command]
+pub async fn retry_failed_upload_items(
+    app: AppHandle,
+    pool: State<'_, SqlitePool>,
+    diagnostics: State<'_, upload::UploadDiagnosticsRegistry>,
+    batch_id: String,
+) -> Result<upload::UploadBatchProgress, String> {
+    let batch_id =
+        uuid::Uuid::parse_str(&batch_id).map_err(|_| "上传批次标识无效。".to_string())?;
+    let capture_ids = crate::database::failed_upload_capture_ids(pool.inner(), batch_id)
+        .await
+        .map_err(|_| "无法读取失败的上传项目。".to_string())?;
+    if capture_ids.is_empty() {
+        return Err("当前批次没有可重试的失败项目。".to_string());
+    }
+    let profile = crate::database::remote_profile(pool.inner(), upload::profile_id())
+        .await
+        .map_err(|_| "无法读取远程服务器配置。".to_string())?
+        .ok_or_else(|| "请先在“远程存储”中保存并测试服务器配置。".to_string())?;
+    upload::validate_stored_profile(&app, &profile)
+        .map_err(|error| upload_error_message(&error))?;
+    let batch = crate::database::create_upload_batch(
+        pool.inner(),
+        upload::profile_id(),
+        &capture_ids,
+        "manual",
+    )
+    .await
+    .map_err(|error| match error {
+        crate::database::DatabaseError::UploadAlreadyInProgress => {
+            "已有一个后台上传批次正在运行。".to_string()
+        }
+        crate::database::DatabaseError::CaptureNotFound => {
+            "失败项目对应的截图已不存在，请刷新后重试。".to_string()
+        }
+        _ => "无法创建重试批次。".to_string(),
+    })?;
+    let progress = load_upload_progress(pool.inner(), batch.id, diagnostics.inner()).await?;
+    diagnostics.begin(batch.id, progress.total_bytes);
+    spawn_upload_batch(app, pool.inner().clone(), profile, batch.id);
+    Ok(progress)
+}
+
+#[tauri::command]
+pub async fn cancel_upload_batch(
+    pool: State<'_, SqlitePool>,
+    diagnostics: State<'_, upload::UploadDiagnosticsRegistry>,
+    batch_id: String,
+) -> Result<upload::UploadBatchProgress, String> {
+    let batch_id =
+        uuid::Uuid::parse_str(&batch_id).map_err(|_| "上传批次标识无效。".to_string())?;
+    crate::database::cancel_upload_batch(pool.inner(), batch_id)
+        .await
+        .map_err(|error| match error {
+            crate::database::DatabaseError::CaptureNotFound => "上传批次不存在。".to_string(),
+            crate::database::DatabaseError::InvalidUploadSelection => {
+                "这个上传批次已经结束，无法取消。".to_string()
+            }
+            _ => "无法取消后台上传。".to_string(),
+        })?;
+    load_upload_progress(pool.inner(), batch_id, diagnostics.inner()).await
 }
 
 #[tauri::command]

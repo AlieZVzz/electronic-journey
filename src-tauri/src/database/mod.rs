@@ -958,9 +958,26 @@ pub async fn upload_batch_items(
     .map_err(Into::into)
 }
 
+pub async fn failed_upload_capture_ids(
+    pool: &SqlitePool,
+    batch_id: Uuid,
+) -> Result<Vec<Uuid>, DatabaseError> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT capture_id FROM upload_items WHERE batch_id = ? AND state = 'failed' ORDER BY created_at_utc, id",
+    )
+    .bind(batch_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    ids.into_iter()
+        .map(|value| Uuid::parse_str(&value).map_err(|_| DatabaseError::InvalidUploadSelection))
+        .collect()
+}
+
 pub async fn start_upload_batch(pool: &SqlitePool, batch_id: Uuid) -> Result<(), DatabaseError> {
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    sqlx::query("UPDATE upload_batches SET state = 'uploading', updated_at_utc = ? WHERE id = ?")
+    sqlx::query(
+        "UPDATE upload_batches SET state = 'uploading', updated_at_utc = ? WHERE id = ? AND state = 'pending'",
+    )
         .bind(now)
         .bind(batch_id.to_string())
         .execute(pool)
@@ -1027,6 +1044,63 @@ pub async fn finish_upload_batch(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn cancel_upload_batch(pool: &SqlitePool, batch_id: Uuid) -> Result<(), DatabaseError> {
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut transaction = pool.begin().await?;
+    let state: Option<String> = sqlx::query_scalar("SELECT state FROM upload_batches WHERE id = ?")
+        .bind(batch_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+    let Some(state) = state else {
+        return Err(DatabaseError::CaptureNotFound);
+    };
+    if !matches!(state.as_str(), "pending" | "uploading") {
+        return Err(DatabaseError::InvalidUploadSelection);
+    }
+    sqlx::query(
+        "UPDATE upload_items SET state = 'cancelled', updated_at_utc = ? WHERE batch_id = ? AND state = 'pending'",
+    )
+    .bind(&now)
+    .bind(batch_id.to_string())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE upload_batches
+        SET state = 'cancelled',
+            completed_items = (
+                SELECT COUNT(*) FROM upload_items
+                WHERE upload_items.batch_id = upload_batches.id
+                  AND upload_items.state = 'uploaded'
+            ),
+            failed_items = (
+                SELECT COUNT(*) FROM upload_items
+                WHERE upload_items.batch_id = upload_batches.id
+                  AND upload_items.state = 'failed'
+            ),
+            updated_at_utc = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&now)
+    .bind(batch_id.to_string())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn upload_batch_is_cancelled(
+    pool: &SqlitePool,
+    batch_id: Uuid,
+) -> Result<bool, DatabaseError> {
+    let state: Option<String> = sqlx::query_scalar("SELECT state FROM upload_batches WHERE id = ?")
+        .bind(batch_id.to_string())
+        .fetch_optional(pool)
+        .await?;
+    Ok(state.as_deref() == Some("cancelled"))
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -1719,6 +1793,76 @@ mod tests {
         create_upload_batch(&pool, "primary", &[first_capture_id], "manual")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_marks_pending_items_without_losing_uploaded_state() {
+        let pool = migrated_memory_pool().await;
+        save_test_remote_profile(&pool).await;
+        let captured_at = Utc::now();
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let mut first = record(first_id, captured_at);
+        first.local_path = "captures/cancel-first.webp";
+        insert_capture(&pool, &first)
+            .await
+            .unwrap();
+        let mut second = record(second_id, captured_at + chrono::Duration::seconds(1));
+        second.local_path = "captures/cancel-second.webp";
+        insert_capture(&pool, &second)
+            .await
+            .unwrap();
+        let batch = create_upload_batch(&pool, "primary", &[first_id, second_id], "manual")
+            .await
+            .unwrap();
+        start_upload_batch(&pool, batch.id).await.unwrap();
+        let items = upload_batch_items(&pool, batch.id).await.unwrap();
+        set_upload_item_state(&pool, &items[0].id, "uploading", None)
+            .await
+            .unwrap();
+        set_upload_item_state(&pool, &items[0].id, "uploaded", None)
+            .await
+            .unwrap();
+
+        cancel_upload_batch(&pool, batch.id).await.unwrap();
+        let status = upload_batch_status(&pool, batch.id).await.unwrap().unwrap();
+        assert_eq!(status.batch.state, "cancelled");
+        assert_eq!(status.batch.completed_items, 1);
+        assert_eq!(status.items[0].state, "uploaded");
+        assert_eq!(status.items[1].state, "cancelled");
+        assert_eq!(active_upload_batch_id(&pool).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn failed_items_can_be_selected_for_a_new_retry_batch() {
+        let pool = migrated_memory_pool().await;
+        save_test_remote_profile(&pool).await;
+        let capture_id = Uuid::new_v4();
+        insert_capture(&pool, &record(capture_id, Utc::now()))
+            .await
+            .unwrap();
+        let failed_batch = create_upload_batch(&pool, "primary", &[capture_id], "manual")
+            .await
+            .unwrap();
+        let item = upload_batch_items(&pool, failed_batch.id).await.unwrap().remove(0);
+        set_upload_item_state(&pool, &item.id, "failed", Some("connection"))
+            .await
+            .unwrap();
+        finish_upload_batch(&pool, failed_batch.id, 0, 1)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            failed_upload_capture_ids(&pool, failed_batch.id)
+                .await
+                .unwrap(),
+            vec![capture_id]
+        );
+        let retry_batch = create_upload_batch(&pool, "primary", &[capture_id], "manual")
+            .await
+            .unwrap();
+        assert_ne!(retry_batch.id, failed_batch.id);
+        assert_eq!(active_upload_batch_id(&pool).await.unwrap(), Some(retry_batch.id));
     }
 
     #[tokio::test]
