@@ -1,4 +1,6 @@
 # Electronic Journey
+<img width="1175" height="754" alt="image" src="https://github.com/user-attachments/assets/804f0476-9dc4-459f-bdcd-d8c8d955dfa0" />
+
 
 Electronic Journey 是一款面向个人用户的数字旅程记录工具。它将在用户明确授权并主动开启后，按计划截取所选显示器，在本机保存原图和缩略图，并支持由用户明确选择和确认后上传到个人 SFTP 文件夹。
 
