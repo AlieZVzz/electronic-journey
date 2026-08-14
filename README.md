@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/AlieZVzz/electronic-journey/actions/workflows/ci.yml/badge.svg)](https://github.com/AlieZVzz/electronic-journey/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/AlieZVzz/electronic-journey?include_prereleases&sort=semver)](https://github.com/AlieZVzz/electronic-journey/releases)
-[![License: TBD](https://img.shields.io/badge/license-TBD-lightgrey.svg)](#许可证)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Electronic Journey 是一个 local-first 的桌面应用，用来记录个人的数字旅程。
 在用户明确授权并主动开始记录后，它会按计划截取所选显示器，将原图和缩略图保存在本机，并提供本地时间线浏览、选择、删除和可选的个人 SFTP 上传。
@@ -35,7 +35,7 @@ Electronic Journey 的设计目标是让记录过程可见、可控、可恢复�
 | 锁屏、休眠/唤醒、空闲监听和托盘状态机 | 已实现，待两端真机验收 |
 | 个人 SFTP 配置、手动选择上传、失败项重试/取消 | 已实现，部分平台凭据行为待验收 |
 | 自动同步 | 已实现，默认关闭 |
-| 稳定版发布、代码签名和许可证 | 尚未完成 |
+| 稳定版发布和代码签名 | 尚未完成 |
 
 详细进度见 `tasks/todo.md`，产品和安全约束见 `electronic-journey-design.md`。
 
@@ -181,11 +181,11 @@ electronic-journey-design.md
 
 ## 路线图
 
-近期工作包括完成 macOS/Windows 真机验收、补齐凭据和上传队列的崩溃恢复测试、完善缩略图失败后的后台重建，并决定正式发布渠道与许可证。更长期的方向包括本地 OCR/全文搜索、隐私遮挡、收藏标签和旅程包导出。
+近期工作包括完成 macOS/Windows 真机验收、补齐凭据和上传队列的崩溃恢复测试、完善缩略图失败后的后台重建，并决定正式发布渠道。更长期的方向包括本地 OCR/全文搜索、隐私遮挡、收藏标签和旅程包导出。
 
 ## 许可证
 
-许可证尚未确定。当前仓库内容不应被视为已授予某个开源许可证；在许可证正式发布前，请不要将本项目作为第三方依赖进行再分发。
+本项目基于 [MIT License](LICENSE) 发布。
 
 ## 致谢
 
