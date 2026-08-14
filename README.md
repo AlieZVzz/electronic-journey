@@ -1,141 +1,192 @@
 # Electronic Journey
-<img width="1175" height="754" alt="image" src="https://github.com/user-attachments/assets/804f0476-9dc4-459f-bdcd-d8c8d955dfa0" />
 
+[![CI](https://github.com/AlieZVzz/electronic-journey/actions/workflows/ci.yml/badge.svg)](https://github.com/AlieZVzz/electronic-journey/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/AlieZVzz/electronic-journey?include_prereleases&sort=semver)](https://github.com/AlieZVzz/electronic-journey/releases)
+[![License: TBD](https://img.shields.io/badge/license-TBD-lightgrey.svg)](#许可证)
 
-Electronic Journey 是一款面向个人用户的数字旅程记录工具。它将在用户明确授权并主动开启后，按计划截取所选显示器，在本机保存原图和缩略图，并支持由用户明确选择和确认后上传到个人 SFTP 文件夹。
+Electronic Journey 是一个 local-first 的桌面应用，用来记录个人的数字旅程。
+在用户明确授权并主动开始记录后，它会按计划截取所选显示器，将原图和缩略图保存在本机，并提供本地时间线浏览、选择、删除和可选的个人 SFTP 上传。
 
-当前 macOS 原型已接通屏幕录制权限和主显示器截图，Windows.Graphics.Capture 显示器截图适配器也已加入。两端共用普通 WebP 与缩略图原子写入、SQLite 时间线和启动索引恢复；macOS 与 Windows 的锁屏、休眠/唤醒和空闲监听以及动态托盘控制已接入同一 Rust 状态机。个人 SFTP 配置、上传队列与手动选择界面已进入第一期实现，Windows 捕获、系统事件与托盘真机验收仍待完成。
+![Electronic Journey timeline](https://github.com/user-attachments/assets/804f0476-9dc4-459f-bdcd-d8c8d955dfa0)
 
-最低运行版本为 macOS Sequoia 15 和 Windows 11。
+> 项目目前处于早期开发阶段。macOS 原型和核心本地流程已经可以运行；Windows 捕获、系统事件和托盘行为仍需要在真实设备上完成验收。请不要把当前版本视为稳定生产版本。
 
-## 技术栈
+## 为什么做这个项目
 
-- Tauri 2 + Rust
-- React 19 + TypeScript + Vite 6
-- SQLite + `sqlx`
-- macOS Keychain / Windows Credential Manager（用于私钥口令）
-- Rust `russh` 与 `russh-sftp`（用于固定主机指纹的个人服务器上传）
+Electronic Journey 的设计目标是让记录过程可见、可控、可恢复：截图默认只留在设备上，应用不隐藏运行，不绕过系统权限，也不把图片发送到项目方的云端。用户可以在本地查看和管理时间线；如果需要备份，再明确选择图片并确认上传到自己管理的 SFTP 服务器。
 
-## 环境要求
+## 特性
+
+- **本地优先**：原图、缩略图和时间线元数据保存在本机 SQLite 与应用目录中。
+- **明确授权**：依赖操作系统的屏幕录制权限；开始、暂停、停止和退出状态对用户可见。
+- **可恢复的时间线**：使用数据库中的采集时间排序，启动时恢复索引，图片写入采用临时文件、同步和原子改名。
+- **资源友好的存储**：保存无损 WebP 原图和有界 WebP 缩略图，并对重复画面进行稳定内容去重。
+- **系统状态感知**：支持锁屏、休眠/唤醒和空闲状态下的安全暂停逻辑。
+- **可选的个人服务器上传**：用户勾选图片并二次确认后，Rust 客户端才通过固定 SSH 主机指纹的 SFTP 上传原图。
+- **窄权限边界**：前端不能直接访问任意文件系统、shell、截图或网络；敏感操作由 Rust Tauri 命令完成。
+
+## 当前状态
+
+| 能力 | 状态 |
+| --- | --- |
+| macOS 主显示器截图与屏幕录制权限流程 | 已实现，待 macOS 15+ 真机验收 |
+| Windows.Graphics.Capture 适配器 | 已实现，待 Windows 11 真机验收 |
+| 本地 WebP、缩略图、SQLite 时间线和启动恢复 | 已实现 |
+| 锁屏、休眠/唤醒、空闲监听和托盘状态机 | 已实现，待两端真机验收 |
+| 个人 SFTP 配置、手动选择上传、失败项重试/取消 | 已实现，部分平台凭据行为待验收 |
+| 自动同步 | 已实现，默认关闭 |
+| 稳定版发布、代码签名和许可证 | 尚未完成 |
+
+详细进度见 `tasks/todo.md`，产品和安全约束见 `electronic-journey-design.md`。
+
+## 支持平台
+
+- macOS Sequoia 15 或更高版本
+- Windows 11 或更高版本
+
+当前没有 Linux 桌面支持计划。不同显示器、Retina/DPI、任务栏和权限撤销场景仍以真机验收结果为准。
+
+## 快速开始
+
+### 环境要求
 
 - Node.js 20.19 或更高版本
 - npm 10 或更高版本
-- Rust stable（通过 [rustup](https://rustup.rs/) 安装）
-- Tauri 对应平台的系统依赖：
+- Rust stable（推荐通过 [rustup](https://rustup.rs/) 安装）
+- Tauri 2 对应平台的系统依赖：
   - [macOS prerequisites](https://v2.tauri.app/start/prerequisites/#macos)
   - [Windows prerequisites](https://v2.tauri.app/start/prerequisites/#windows)
 
-首次安装：
+### 安装依赖
 
-```bash
+~~~bash
+git clone https://github.com/AlieZVzz/electronic-journey.git
+cd electronic-journey
 scripts/init.sh
-```
+~~~
 
-本机尚未安装 Rust 时，脚本仍会安装前端依赖，并提示补装 Rust 后继续。
+如果本机尚未安装 Rust，初始化脚本仍会安装前端依赖，并提示后续补装 Rust。
 
-## 本地开发
+### 运行
 
-浏览器中运行界面（使用安全的本地演示状态，不执行截图、文件读取、远程连接或上传）：
+在浏览器中运行安全的本地演示界面。该模式不会截图、读取文件、连接远程服务器或上传图片：
 
-```bash
+~~~bash
 npm run dev
-```
+~~~
 
-运行桌面应用：
+运行 Tauri 桌面应用：
 
-```bash
+~~~bash
 npm run dev:desktop
-```
+~~~
 
-调试 macOS 屏幕录制权限时，使用带稳定本地 TCC 身份的 debug
-应用包，避免普通 `tauri dev` 重编译后被系统识别成另一个可执行文件：
+调试 macOS 屏幕录制权限时，可以构建带稳定本地 TCC 身份的 debug 应用包：
 
-```bash
+~~~bash
 npm run build:desktop:debug
-```
+~~~
 
-构建与本地签名验证成功后，命令会自动打开 debug 应用。
+如需清除该应用的旧屏幕录制授权记录：
 
-切换到稳定 debug 身份后如需清除旧授权记录，可执行一次：
-
-```bash
+~~~bash
 tccutil reset ScreenCapture com.electronicjourney.app
-```
+~~~
 
-运行检查：
+## 开发与检查
 
-```bash
-scripts/check.sh
-```
+常用命令：
 
-## 自动构建与打包
+~~~bash
+npm run lint             # ESLint
+npm run typecheck       # TypeScript 类型检查
+npm test                # 前端测试
+npm run build           # 前端生产构建
+cargo check --workspace # Rust 编译检查
+cargo test --workspace  # Rust 测试
+scripts/check.sh        # 运行完整的本地检查
+~~~
 
-GitHub Actions 会在推送到 `main` 或创建 Pull Request 时运行前端检查，
-并分别在 macOS 与 Windows 上编译和测试 Rust workspace。
+前端检查要求 Node.js 20.19.5；GitHub Actions 会在推送到 `main` 或创建 Pull Request 时运行前端检查，并在 macOS 与 Windows runner 上运行 Rust 检查和测试。
 
-推送与应用版本一致的标签会自动构建三个桌面安装包。各平台先向同一个
-Draft Release 上传安装包；只有全部平台构建成功且四个预期安装包齐全后，
-工作流才会自动公开 Release：
+改动行为前请先阅读：
 
-- `macOS Apple Silicon`：DMG
-- `macOS Intel`：DMG
-- `Windows x64`：MSI 与 NSIS 安装程序
+- `electronic-journey-design.md`：产品、安全边界和验收标准
+- `docs/architecture.md`：系统架构与模块边界
+- `docs/threat-model.md`：威胁模型
+- `docs/api.md`：Tauri 命令边界
+- `docs/file-format.md`：本地图片格式
+- `docs/coding-style.md`：编码规范
 
-例如当前版本为 `0.1.1` 时：
+## 隐私与安全边界
 
-```bash
+- 应用不隐蔽运行，不隐藏托盘图标，不绕过系统屏幕录制授权。
+- 不记录键盘、剪贴板、浏览器历史、麦克风或窗口文本。
+- 默认不上传图片，也不建设项目方的图片云、对象存储或 LLM 中转服务。
+- 自动同步默认关闭；启用后只同步用户自管服务器上指定文件夹中的当天图片。
+- 私钥口令只存入 macOS Keychain 或 Windows Credential Manager，不写入 SQLite、前端状态或日志。
+- SFTP 连接会校验已保存的 SSH 主机 SHA-256 指纹；上传前后会校验文件完整性。
+- 客户端不配置或感知 Hermes、提示词、模型和其他远端消费者，也不声称远端图片已被后续程序读取。
+
+完整边界和数据流请参阅 `docs/threat-model.md` 与 `electronic-journey-design.md`。
+
+## 发布桌面安装包
+
+推送与应用版本一致的标签会触发 GitHub Actions 打包流程：
+
+~~~bash
 git tag v0.1.1
 git push origin v0.1.1
-```
+~~~
 
-也可以从 GitHub Actions 的 **Package desktop apps** 页面手动触发构建。
-手动构建只保存 workflow artifacts，不创建或公开 Release。
+工作流会构建：
 
-如果任一平台构建失败，Release 会保持为 Draft，避免公开缺少平台安装包的
-不完整版本。修复失败后，应删除未发布的 Draft、在修复提交上重建同名标签，
-再重新触发完整发布流程。
+- macOS Apple Silicon：DMG
+- macOS Intel：DMG
+- Windows x64：MSI 与 NSIS 安装程序
 
-macOS 未配置 Apple 开发者证书时使用 ad-hoc 签名，适合内部测试。
-正式分发前应在仓库 Actions Secrets 中配置
-`APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、
-`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD` 与
-`APPLE_TEAM_ID`，让 Tauri 完成 Developer ID 签名和公证。
-Windows 安装包当前未进行 Authenticode 签名；公开发布前仍需接入可信代码签名证书。
+所有平台构建成功且预期安装包齐全后，Draft Release 才会自动公开。也可以从 GitHub Actions 的 **Package desktop apps** 页面手动触发构建；手动构建只生成 workflow artifacts，不会创建公开 Release。
 
-应用版本必须同时更新 `package.json`、`package-lock.json`、
-`src-tauri/tauri.conf.json` 和根目录 `Cargo.toml`。CI 会检查它们以及发布标签是否一致。
+发布前请注意：
+
+- 应用版本必须同步更新 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json` 和根目录 `Cargo.toml`。
+- 未配置 Apple 开发者证书时，macOS 使用 ad-hoc 签名，仅适合内部测试。
+- Windows 安装包目前未进行 Authenticode 签名。
+- 公开分发前仍需完成可信代码签名、公证和安装提示验证。
 
 ## 项目结构
 
-```text
-electronic-journey/
-├── src/                    # React 表现层、页面、状态与 IPC 客户端
-├── src-tauri/              # Tauri 桌面壳、Rust 核心服务与 SQLite 迁移
-│   ├── capabilities/       # 最小权限能力声明
-│   ├── migrations/
-│   └── src/
-├── server/                 # 早期云同步原型；当前产品路径不使用
-├── docs/                   # 长期架构、安全、接口与协作文档
-├── tasks/                  # 待办、进行中与完成记录
-├── memory/                 # 长期背景、决策和经验
-├── scripts/                # 初始化、检查与锁文件同步入口
-├── .codex/                 # 项目级 Codex 配置和命令规则
-└── electronic-journey-design.md
-```
+~~~text
+src/                    # React 表现层、页面、状态与 IPC 客户端
+src-tauri/              # Tauri 壳、Rust 核心服务、平台适配器和 SQLite 迁移
+docs/                   # 架构、安全、接口、文件格式与协作文档
+scripts/                # 初始化、检查、版本同步与 debug 签名脚本
+tasks/                  # 待办、进行中与完成记录
+memory/                 # 项目决策和经验记录
+electronic-journey-design.md
+~~~
 
-## 隐私边界
+`server/` 中的代码属于早期控制面原型，不是当前产品的图片存储或同步路径。
 
-- 不隐蔽运行，不隐藏托盘图标，不绕过系统截图授权。
-- 新截图默认只在本机保存普通 WebP 原图和缩略图。
-- 不记录键盘、剪贴板、浏览器历史、麦克风或窗口文本。
-- 不建设自有图片云端、对象存储或 LLM 图片中转服务。
-- 只有在用户选择图片并确认后，Rust 客户端才会通过 SFTP 上传到已配置的个人服务器文件夹。
-- 客户端不配置或感知远端 Hermes、提示词、模型和其他图片消费者。
-- 自动同步默认关闭；只有用户在远程存储中显式开启后，才会按设定间隔同步当天未同步图片。
+## 参与贡献
 
-完整设计、阶段和验收标准见
-[`electronic-journey-design.md`](electronic-journey-design.md)。
+欢迎提交 Issue、改进文档或 Pull Request。提交代码前请：
 
-## License
+1. 先阅读产品设计、安全边界和相关模块文档。
+2. 为新的业务逻辑补充聚焦测试，为 bug 修复补充回归测试。
+3. 运行与改动相关的最小检查；条件允许时再运行 `scripts/check.sh`。
+4. 在 Pull Request 中说明改动范围、验证命令、平台和已知风险。
 
-许可证尚未确定。项目发布前需完成许可证决策。
+安全问题请不要直接公开提交 Issue；请先通过仓库维护者提供的私密渠道联系。
+
+## 路线图
+
+近期工作包括完成 macOS/Windows 真机验收、补齐凭据和上传队列的崩溃恢复测试、完善缩略图失败后的后台重建，并决定正式发布渠道与许可证。更长期的方向包括本地 OCR/全文搜索、隐私遮挡、收藏标签和旅程包导出。
+
+## 许可证
+
+许可证尚未确定。当前仓库内容不应被视为已授予某个开源许可证；在许可证正式发布前，请不要将本项目作为第三方依赖进行再分发。
+
+## 致谢
+
+本项目基于 [Tauri](https://tauri.app/)、[React](https://react.dev/)、[Vite](https://vite.dev/)、[Rust](https://www.rust-lang.org/)、[SQLite](https://www.sqlite.org/) 以及相关开源生态构建。
