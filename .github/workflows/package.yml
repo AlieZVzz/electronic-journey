@@ -63,20 +63,43 @@ jobs:
         run: npm run check:version -- "$RELEASE_TAG"
         shell: bash
 
+      - name: Configure optional Apple signing
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_SECRET: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD_SECRET: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY_SECRET: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD_SECRET: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -n "$APPLE_CERTIFICATE_SECRET" ]]; then
+            printf 'APPLE_CERTIFICATE=%s\n' "$APPLE_CERTIFICATE_SECRET" >> "$GITHUB_ENV"
+
+            if [[ -n "$APPLE_CERTIFICATE_PASSWORD_SECRET" ]]; then
+              printf 'APPLE_CERTIFICATE_PASSWORD=%s\n' "$APPLE_CERTIFICATE_PASSWORD_SECRET" >> "$GITHUB_ENV"
+            fi
+
+            if [[ -n "$APPLE_SIGNING_IDENTITY_SECRET" ]]; then
+              printf 'APPLE_SIGNING_IDENTITY=%s\n' "$APPLE_SIGNING_IDENTITY_SECRET" >> "$GITHUB_ENV"
+            fi
+          fi
+
+          if [[ -n "$APPLE_ID_SECRET" && -n "$APPLE_PASSWORD_SECRET" && -n "$APPLE_TEAM_ID_SECRET" ]]; then
+            printf 'APPLE_ID=%s\n' "$APPLE_ID_SECRET" >> "$GITHUB_ENV"
+            printf 'APPLE_PASSWORD=%s\n' "$APPLE_PASSWORD_SECRET" >> "$GITHUB_ENV"
+            printf 'APPLE_TEAM_ID=%s\n' "$APPLE_TEAM_ID_SECRET" >> "$GITHUB_ENV"
+          fi
+
       - name: Build desktop packages
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && 'Electronic Journey v__VERSION__' || '' }}
-          releaseBody: ${{ startsWith(github.ref, 'refs/tags/') && '自动构建的 macOS 与 Windows 安装包。发布前请完成对应平台的真机验收。' || '' }}
+          releaseBody: ${{ startsWith(github.ref, 'refs/tags/') && '自动构建的 macOS 与 Windows 安装包。发布工作流已验证所有预期安装包齐全；代码签名状态与安装提示请参阅 README。' || '' }}
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           generateReleaseNotes: ${{ startsWith(github.ref, 'refs/tags/') }}
@@ -84,3 +107,47 @@ jobs:
           workflowArtifactNamePattern: electronic-journey-[version]-[platform]-[arch]-[bundle]
           releaseAssetNamePattern: electronic-journey_[version]_[platform]_[arch][ext]
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+  publish:
+    name: Publish complete release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          expected_assets=(
+            "electronic-journey_${version}_darwin_aarch64.dmg"
+            "electronic-journey_${version}_darwin_x64.dmg"
+            "electronic-journey_${version}_windows_x64.exe"
+            "electronic-journey_${version}_windows_x64.msi"
+          )
+
+          if [[ "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')" != "true" ]]; then
+            echo "Release $GITHUB_REF_NAME is missing or is not a draft." >&2
+            exit 1
+          fi
+
+          mapfile -t actual_assets < <(
+            gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json assets \
+              --jq '.assets[].name'
+          )
+
+          for expected_asset in "${expected_assets[@]}"; do
+            if ! printf '%s\n' "${actual_assets[@]}" | grep -Fqx -- "$expected_asset"; then
+              echo "Release asset is missing: $expected_asset" >&2
+              exit 1
+            fi
+          done
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false

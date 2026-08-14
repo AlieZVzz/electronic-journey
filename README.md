@@ -73,7 +73,9 @@ scripts/check.sh
 GitHub Actions 会在推送到 `main` 或创建 Pull Request 时运行前端检查，
 并分别在 macOS 与 Windows 上编译和测试 Rust workspace。
 
-推送与应用版本一致的标签会自动构建三个桌面安装包，并创建 Draft Release：
+推送与应用版本一致的标签会自动构建三个桌面安装包。各平台先向同一个
+Draft Release 上传安装包；只有全部平台构建成功且四个预期安装包齐全后，
+工作流才会自动公开 Release：
 
 - `macOS Apple Silicon`：DMG
 - `macOS Intel`：DMG
@@ -87,7 +89,11 @@ git push origin v0.1.1
 ```
 
 也可以从 GitHub Actions 的 **Package desktop apps** 页面手动触发构建。
-手动构建只保存 workflow artifacts，不创建 Release。
+手动构建只保存 workflow artifacts，不创建或公开 Release。
+
+如果任一平台构建失败，Release 会保持为 Draft，避免公开缺少平台安装包的
+不完整版本。修复失败后，应删除未发布的 Draft、在修复提交上重建同名标签，
+再重新触发完整发布流程。
 
 macOS 未配置 Apple 开发者证书时使用 ad-hoc 签名，适合内部测试。
 正式分发前应在仓库 Actions Secrets 中配置
