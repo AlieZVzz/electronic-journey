@@ -1804,14 +1804,10 @@ mod tests {
         let second_id = Uuid::new_v4();
         let mut first = record(first_id, captured_at);
         first.local_path = "captures/cancel-first.webp";
-        insert_capture(&pool, &first)
-            .await
-            .unwrap();
+        insert_capture(&pool, &first).await.unwrap();
         let mut second = record(second_id, captured_at + chrono::Duration::seconds(1));
         second.local_path = "captures/cancel-second.webp";
-        insert_capture(&pool, &second)
-            .await
-            .unwrap();
+        insert_capture(&pool, &second).await.unwrap();
         let batch = create_upload_batch(&pool, "primary", &[first_id, second_id], "manual")
             .await
             .unwrap();
@@ -1844,7 +1840,10 @@ mod tests {
         let failed_batch = create_upload_batch(&pool, "primary", &[capture_id], "manual")
             .await
             .unwrap();
-        let item = upload_batch_items(&pool, failed_batch.id).await.unwrap().remove(0);
+        let item = upload_batch_items(&pool, failed_batch.id)
+            .await
+            .unwrap()
+            .remove(0);
         set_upload_item_state(&pool, &item.id, "failed", Some("connection"))
             .await
             .unwrap();
@@ -1862,7 +1861,10 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(retry_batch.id, failed_batch.id);
-        assert_eq!(active_upload_batch_id(&pool).await.unwrap(), Some(retry_batch.id));
+        assert_eq!(
+            active_upload_batch_id(&pool).await.unwrap(),
+            Some(retry_batch.id)
+        );
     }
 
     #[tokio::test]
