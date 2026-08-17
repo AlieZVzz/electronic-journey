@@ -1565,6 +1565,23 @@ pub async fn get_active_upload_batch(
         .map(Some)
 }
 
+#[tauri::command]
+pub async fn get_latest_unhandled_interrupted_upload_batch(
+    pool: State<'_, SqlitePool>,
+    diagnostics: State<'_, upload::UploadDiagnosticsRegistry>,
+) -> Result<Option<upload::UploadBatchProgress>, String> {
+    let Some(batch_id) =
+        crate::database::latest_unhandled_interrupted_upload_batch_id(pool.inner())
+            .await
+            .map_err(|_| "无法读取上次中断的上传状态。".to_string())?
+    else {
+        return Ok(None);
+    };
+    load_upload_progress(pool.inner(), batch_id, diagnostics.inner())
+        .await
+        .map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

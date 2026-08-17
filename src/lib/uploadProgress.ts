@@ -57,6 +57,12 @@ export function activeUploadProgressMessage(
   return `${phaseLabels[performance.phase]}：${details.join(" · ")}`;
 }
 
+export function interruptedUploadProgressMessage(
+  progress: UploadBatchProgress,
+): string {
+  return `上次应用退出时中断了 ${progress.failedItems} 张截图的上传，已暂停等待处理；不会自动重传。`;
+}
+
 export function uploadDiagnosticsSummary(
   progress: UploadBatchProgress,
 ): string | null {

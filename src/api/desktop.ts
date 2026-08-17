@@ -248,6 +248,15 @@ export const desktopApi = {
     return invoke<UploadBatchProgress | null>("get_active_upload_batch");
   },
 
+  async getLatestUnhandledInterruptedUploadBatch(): Promise<UploadBatchProgress | null> {
+    if (!isTauriRuntime()) {
+      return null;
+    }
+    return invoke<UploadBatchProgress | null>(
+      "get_latest_unhandled_interrupted_upload_batch",
+    );
+  },
+
   async retryFailedUploadItems(batchId: string): Promise<UploadBatchProgress> {
     if (!isTauriRuntime()) {
       throw new Error("失败的上传项目只能在桌面应用中重试。");

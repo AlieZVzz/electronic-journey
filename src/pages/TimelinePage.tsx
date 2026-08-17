@@ -14,6 +14,7 @@ import {
 } from "../lib/timeline";
 import {
   activeUploadProgressMessage,
+  interruptedUploadProgressMessage,
   uploadDiagnosticsSummary,
 } from "../lib/uploadProgress";
 import type {
@@ -160,6 +161,10 @@ export function TimelinePage() {
   const [deleteCandidate, setDeleteCandidate] =
     useState<TimelineCapture | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [bulkDeleteCandidates, setBulkDeleteCandidates] = useState<
+    TimelineCapture[] | null
+  >(null);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [selectedItems, setSelectedItems] = useState<Map<string, number>>(
     () => new Map(),
   );
@@ -334,12 +339,26 @@ export function TimelinePage() {
     void desktopApi
       .getActiveUploadBatch()
       .then((progress) => {
-        if (!active || !progress) {
+        if (progress) {
+          if (!active) {
+            return null;
+          }
+          setUploadProgress(progress);
+          applyUploadProgress(progress);
+          setUploadMessage(activeUploadProgressMessage(progress));
+          return null;
+        }
+        return desktopApi.getLatestUnhandledInterruptedUploadBatch();
+      })
+      .then((recoveredProgress) => {
+        if (!active || !recoveredProgress) {
           return;
         }
-        setUploadProgress(progress);
-        applyUploadProgress(progress);
-        setUploadMessage(activeUploadProgressMessage(progress));
+        setUploadProgress(recoveredProgress);
+        applyUploadProgress(recoveredProgress);
+        setUploadMessage(
+          interruptedUploadProgressMessage(recoveredProgress),
+        );
       })
       .catch((reason) => {
         if (active) {
@@ -625,6 +644,91 @@ export function TimelinePage() {
     }
   }
 
+  function prepareBulkDelete() {
+    if (selectedIds.size === 0 || bulkDeleting) {
+      return;
+    }
+    const candidates = captures.filter((capture) =>
+      selectedIds.has(capture.id),
+    );
+    if (candidates.length === 0) {
+      setError("所选截图已不在当前时间线，请刷新后重试。");
+      return;
+    }
+    if (candidates.length !== selectedIds.size) {
+      setError("删除所选目前只支持已加载到页面的截图，请先加载更多记录。");
+      return;
+    }
+    setBulkDeleteCandidates(candidates);
+  }
+
+  async function confirmBulkDelete() {
+    if (!bulkDeleteCandidates || bulkDeleting) {
+      return;
+    }
+    const candidates = bulkDeleteCandidates;
+    const activeUploads = candidates.filter(
+      (capture) =>
+        capture.uploadState === "pending" ||
+        capture.uploadState === "uploading",
+    );
+    if (activeUploads.length > 0) {
+      setBulkDeleteCandidates(null);
+      setError(
+        `所选截图中有 ${activeUploads.length} 张正在上传，请等待上传结束后再删除。`,
+      );
+      return;
+    }
+
+    setBulkDeleting(true);
+    setError(null);
+    const deletedIds = new Set<string>();
+    let failedCount = 0;
+    try {
+      for (const capture of candidates) {
+        try {
+          await desktopApi.deleteTimelineCapture(capture.id);
+          deletedIds.add(capture.id);
+          deletedCaptureIdsRef.current.add(capture.id);
+          evictPreview(capture.id);
+          if (preview?.capture.id === capture.id) {
+            closePreview();
+          }
+        } catch {
+          failedCount += 1;
+        }
+      }
+      if (deletedIds.size > 0) {
+        setCaptures((current) =>
+          current.filter(({ id }) => !deletedIds.has(id)),
+        );
+        setSelectedItems((current) => {
+          const next = new Map(current);
+          for (const id of deletedIds) {
+            next.delete(id);
+          }
+          return next;
+        });
+        setNextOffset((current) =>
+          current === null
+            ? null
+            : Math.max(0, current - deletedIds.size),
+        );
+        window.dispatchEvent(
+          new Event("electronic-journey:snapshot-changed"),
+        );
+      }
+      setBulkDeleteCandidates(null);
+      setActionMessage(
+        failedCount === 0
+          ? `已永久删除 ${deletedIds.size} 张本地截图并完成验证。`
+          : `已删除 ${deletedIds.size} 张截图，${failedCount} 张删除失败，请刷新后重试。`,
+      );
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
+
   function toggleCaptureSelection(capture: TimelineCapture) {
     setSelectedItems((current) => {
       const next = new Map(current);
@@ -832,6 +936,14 @@ export function TimelinePage() {
               : "上传所选"}
           </button>
           <button
+            className="button button--danger"
+            disabled={selectedIds.size === 0 || bulkDeleting}
+            onClick={prepareBulkDelete}
+            type="button"
+          >
+            {bulkDeleting ? "正在删除…" : "删除所选"}
+          </button>
+          <button
             className="button button--ghost"
             aria-busy={loadingAction === "refresh"}
             disabled={loading}
@@ -895,7 +1007,7 @@ export function TimelinePage() {
                     >
                       <label
                         className="timeline-card__select"
-                        title="选择用于上传"
+                        title="选择截图用于上传或删除"
                       >
                         <input
                           aria-label={`选择 ${formatTime(
@@ -1157,6 +1269,52 @@ export function TimelinePage() {
                 type="button"
               >
                 {deletingId ? "正在删除并验证…" : "永久删除"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {bulkDeleteCandidates && (
+        <div
+          className="delete-dialog-backdrop"
+          onMouseDown={(event) => {
+            if (
+              event.target === event.currentTarget &&
+              !bulkDeleting
+            ) {
+              setBulkDeleteCandidates(null);
+            }
+          }}
+        >
+          <section
+            aria-labelledby="bulk-delete-dialog-title"
+            aria-modal="true"
+            className="delete-dialog"
+            role="alertdialog"
+          >
+            <p className="eyebrow">PERMANENT LOCAL DELETE</p>
+            <h2 id="bulk-delete-dialog-title">删除所选截图？</h2>
+            <p>
+              将永久删除所选的 <strong>{bulkDeleteCandidates.length} 张截图</strong> 的本地原图和缩略图。
+              此操作无法在应用内撤销。
+            </p>
+            <div className="delete-dialog__actions">
+              <button
+                className="button button--ghost"
+                disabled={bulkDeleting}
+                onClick={() => setBulkDeleteCandidates(null)}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="button button--danger"
+                disabled={bulkDeleting}
+                onClick={() => void confirmBulkDelete()}
+                type="button"
+              >
+                {bulkDeleting ? "正在删除并验证…" : "永久删除所选"}
               </button>
             </div>
           </section>

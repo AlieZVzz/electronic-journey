@@ -48,6 +48,7 @@ sync_today_now()
 - `upload_selected_captures` 只接受 1 至 500 个截图 UUID；Rust 从 SQLite 获取受控本地路径和确定性远端路径，创建后台批次后立即返回，不等待 SFTP 完成。
 - `get_upload_batch_status` 返回批次状态、实时成功/失败数量、逐项状态、脱敏错误，以及仅存在于当前应用进程的聚合性能诊断：当前阶段、已上传字节、平均速率、预计剩余时间、连接/认证/SFTP 初始化/本地校验/传输耗时和远端元数据操作次数与耗时。诊断不包含路径、摘要、图片内容或凭据。
 - `get_active_upload_batch` 用于页面重新进入后恢复进度跟踪；同一时刻只允许一个 `pending` 或 `uploading` 批次。
+- `get_latest_unhandled_interrupted_upload_batch` 在启动恢复将遗留 `pending`/`uploading` 项目标为 `failed(interrupted)` 后，返回最近一个尚未创建重试批次的中断批次；它只用于提示用户和提供重试入口，不会启动网络任务。
 - `retry_failed_upload_items` 只读取指定批次中状态为 `failed` 的截图，并为它们创建新的手动上传批次；原批次历史不被改写。
 - `cancel_upload_batch` 将尚未开始的项目标记为 `cancelled` 并结束批次；已经处于传输中的单项允许完成后记录真实的 `uploaded` 或 `failed` 状态。
 - `sync_today_now` 仅在用户已显式启用自动同步且计划未因安全错误暂停时创建当天同步任务；截图范围完全由 Rust 从 SQLite 筛选。

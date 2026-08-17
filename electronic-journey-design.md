@@ -170,7 +170,7 @@ Rust 核心可以访问应用专用图片目录、SQLite、用户通过原生文
 
 ### 6.3 `upload_batches`
 
-状态包括 `pending`、`uploading`、`completed`、`partial_failed` 和 `cancelled`，并保存来源（手动或自动）、总项目数、总字节数、完成数和失败数。崩溃恢复时，遗留的 `uploading` 不得自动继续向网络发送；自动调度只能在下一次计划检查重新筛选。
+状态包括 `pending`、`uploading`、`completed`、`partial_failed` 和 `cancelled`，并保存来源（手动或自动）、总项目数、总字节数、完成数和失败数。崩溃恢复时，遗留的 `pending`/`uploading` 项目转为 `failed` 并记录 `interrupted` 错误码，批次转为 `partial_failed`，不得自动继续向网络发送；时间线提示用户后，只能通过显式重试创建新批次。自动调度只能在下一次计划检查重新筛选。
 
 ### 6.4 `upload_items`
 
@@ -233,6 +233,7 @@ SFTP v3 不提供通用远端 SHA-256，因此第一期验证传输前本地 SHA
 - `upload_selected_captures(capture_ids)`：创建后台批次并立即返回批次状态；
 - `get_upload_batch_status(batch_id)`：读取指定批次及逐项进度；
 - `get_active_upload_batch()`：恢复当前活动批次的界面跟踪。
+- `get_latest_unhandled_interrupted_upload_batch()`：读取最近仍等待用户处理的启动恢复批次，不启动网络任务；
 - `retry_failed_upload_items(batch_id)`：只为指定批次的失败项目创建新的手动上传批次；
 - `cancel_upload_batch(batch_id)`：取消尚未开始的项目；当前正在传输的项目完成后记录真实结果。
 - `sync_today_now()`：仅在自动同步已启用且未暂停时，明确触发当天未同步图片的后台同步。
@@ -245,6 +246,7 @@ SFTP v3 不提供通用远端 SHA-256，因此第一期验证传输前本地 SHA
 - 单张失败不终止本地记录，可继续处理同批其他项目。
 - 启动命令不等待网络上传完成；Rust 后台任务推进批次，界面轮询 SQLite 展示进度。
 - 页面切换和时间线刷新不取消后台任务；同一时刻只允许一个活动批次。
+- 应用启动时将遗留的 `pending`/`uploading` 项目标为 `failed(interrupted)`，并把批次转为 `partial_failed`；恢复过程不重放网络请求。最近仍未创建重试批次的中断批次会在时间线提示用户处理。
 - 连接、指纹或认证失败时，本批所有项目记为失败并保存明确错误。
 - 应用重启后不得自动重放未完成网络请求。
 - 自动同步到期检查使用跳过式时钟，不补发休眠期间错过的多个周期。

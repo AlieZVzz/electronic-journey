@@ -1192,6 +1192,39 @@ pub async fn active_upload_batch_id(pool: &SqlitePool) -> Result<Option<Uuid>, D
         .transpose()
 }
 
+pub async fn latest_unhandled_interrupted_upload_batch_id(
+    pool: &SqlitePool,
+) -> Result<Option<Uuid>, DatabaseError> {
+    let id: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT batches.id
+        FROM upload_batches AS batches
+        JOIN upload_items AS items ON items.batch_id = batches.id
+        WHERE items.last_error_code = 'interrupted'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM upload_items AS newer_items
+              JOIN upload_batches AS newer_batches
+                ON newer_batches.id = newer_items.batch_id
+              WHERE newer_items.capture_id = items.capture_id
+                AND (
+                    newer_batches.created_at_utc > batches.created_at_utc
+                    OR (
+                        newer_batches.created_at_utc = batches.created_at_utc
+                        AND newer_batches.id > batches.id
+                    )
+                )
+          )
+        ORDER BY batches.updated_at_utc DESC, batches.id DESC
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+    id.map(|value| Uuid::parse_str(&value).map_err(|_| DatabaseError::InvalidUploadSelection))
+        .transpose()
+}
+
 pub async fn fail_active_upload_batch(
     pool: &SqlitePool,
     batch_id: Uuid,
@@ -1868,7 +1901,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_recovery_fails_active_items_without_replaying_network_work() {
+    async fn startup_recovery_waits_for_user_without_replaying_network_work() {
         let pool = migrated_memory_pool().await;
         let capture_id = Uuid::new_v4();
         let captured_at = DateTime::parse_from_rfc3339("2026-07-29T02:03:04Z")
@@ -1919,6 +1952,23 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(batch_state, ("partial_failed".to_string(), 1));
+        assert_eq!(
+            latest_unhandled_interrupted_upload_batch_id(&pool)
+                .await
+                .unwrap(),
+            Some(batch.id)
+        );
+        let retry_batch = create_upload_batch(&pool, "primary", &[capture_id], "manual")
+            .await
+            .unwrap();
+        assert_ne!(retry_batch.id, batch.id);
+        assert_eq!(
+            latest_unhandled_interrupted_upload_batch_id(&pool)
+                .await
+                .unwrap(),
+            None
+        );
+        cancel_upload_batch(&pool, retry_batch.id).await.unwrap();
         delete_capture(&pool, capture_id).await.unwrap();
     }
 }

@@ -131,6 +131,7 @@ pub fn run() {
             commands::get_app_snapshot,
             commands::set_launch_at_login,
             commands::get_active_upload_batch,
+            commands::get_latest_unhandled_interrupted_upload_batch,
             commands::get_remote_profile,
             commands::get_upload_batch_status,
             commands::delete_timeline_capture,
