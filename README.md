@@ -7,7 +7,10 @@
 Electronic Journey 是一个 local-first 的桌面应用，用来记录个人的数字旅程。
 在用户明确授权并主动开始记录后，它会按计划截取所选显示器，将原图和缩略图保存在本机，并提供本地时间线浏览、选择、删除和可选的个人 SFTP 上传。
 
-![Electronic Journey timeline](https://github.com/user-attachments/assets/804f0476-9dc4-459f-bdcd-d8c8d955dfa0)
+<img width="1292" height="872" alt="image" src="https://github.com/user-attachments/assets/d68de9a9-f027-415f-94a8-b91a0c903545" />
+
+<img width="1292" height="872" alt="Screenshot 2026-08-17 at 15 08 08" src="https://github.com/user-attachments/assets/bd979dd1-3fcf-4b5e-bd89-3097d15c2f21" />
+<img width="1292" height="872" alt="image" src="https://github.com/user-attachments/assets/3790de6a-b741-494a-ab20-5583d46a2c21" />
 
 > 项目目前处于早期开发阶段。macOS 原型和核心本地流程已经可以运行；Windows 捕获、系统事件和托盘行为仍需要在真实设备上完成验收。请不要把当前版本视为稳定生产版本。
 
