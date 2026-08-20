@@ -7,7 +7,17 @@ get_app_snapshot()
 set_launch_at_login(enabled)
 set_recording_state(state)
 update_capture_settings(settings)
+list_timeline_captures(offset, limit, favoriteOnly, tagId)
 list_timeline_day_selection(date_key)
+set_timeline_capture_favorite(capture_id, favorite)
+list_timeline_tags()
+create_timeline_tag(name)
+delete_timeline_tag(tag_id)
+set_timeline_capture_tags(capture_id, tag_ids)
+list_privacy_app_rules()
+add_frontmost_privacy_app_rule()
+set_privacy_app_rule_enabled(rule_id, enabled)
+delete_privacy_app_rule(rule_id)
 refresh_screen_capture_permission()
 request_screen_capture_permission()
 ```
@@ -20,6 +30,10 @@ request_screen_capture_permission()
 - `set_launch_at_login` 只修改当前用户的系统启动配置：macOS 使用 `~/Library/LaunchAgents`，Windows 使用当前用户的 `Run` 注册表项；`AppSnapshot.launchAtLogin` 反映当前应用路径对应的注册状态。
 - 开机启动只启动应用并进入托盘，不会自动开始截图；启动配置不进入 SQLite，也不需要管理员权限。
 - `list_timeline_day_selection` 按当前系统时区解析 `YYYY-MM-DD`，只返回当天全部截图的 ID 和大小，用于跨分页选择，不读取图片内容。
+- `list_timeline_captures` 可接受 `favoriteOnly` 和单个 `tagId` 筛选，并返回收藏状态与本地标签。
+- `set_timeline_capture_favorite`、标签管理命令只更新 SQLite 元数据，不修改图片、哈希、上传历史或远端路径。
+- 隐私应用命令只返回本地显示名、平台、规则 ID 和启用状态；稳定应用标识始终留在 Rust/SQLite 边界内。
+- `AppSnapshot.lastCaptureNotice` 只返回固定的隐私跳过提示，不包含命中的应用名称或标识。
 - Rust 在主窗口之外的托盘操作或系统事件改变状态后发送 `runtime-state-changed`，事件不携带截图或状态正文；前端收到后重新调用 `get_app_snapshot`。
 
 ## 远程存储

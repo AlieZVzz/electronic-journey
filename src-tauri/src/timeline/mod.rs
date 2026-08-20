@@ -25,6 +25,8 @@ pub struct TimelineCapture {
     pub captured_at_utc: DateTime<Utc>,
     pub file_size: u64,
     pub upload_state: String,
+    pub favorite: bool,
+    pub tags: Vec<database::TagRecord>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,8 +57,12 @@ pub async fn list_captures(
     pool: &SqlitePool,
     offset: u32,
     requested_limit: Option<u16>,
+    favorite_only: bool,
+    tag_id: Option<&str>,
 ) -> Result<TimelinePage, TimelineError> {
-    let page = database::list_capture_summaries(pool, offset, requested_limit).await?;
+    let page =
+        database::list_capture_summaries(pool, offset, requested_limit, favorite_only, tag_id)
+            .await?;
     Ok(TimelinePage {
         items: page
             .items
@@ -66,6 +72,8 @@ pub async fn list_captures(
                 captured_at_utc: capture.captured_at_utc,
                 file_size: capture.file_size,
                 upload_state: capture.upload_state,
+                favorite: capture.favorite,
+                tags: capture.tags,
             })
             .collect(),
         next_offset: page.next_offset,

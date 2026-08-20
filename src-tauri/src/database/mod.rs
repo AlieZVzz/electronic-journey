@@ -4,7 +4,7 @@ use chrono::{DateTime, FixedOffset, Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::migrate::MigrateError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -41,6 +41,10 @@ pub enum DatabaseError {
     UploadAlreadyInProgress,
     #[error("database contains invalid JSON settings: {0}")]
     InvalidSettingsJson(#[from] serde_json::Error),
+    #[error("tag input is invalid")]
+    InvalidTag,
+    #[error("privacy application rule is invalid")]
+    InvalidPrivacyRule,
 }
 
 pub async fn connect(path: &Path) -> Result<SqlitePool, DatabaseError> {
@@ -407,6 +411,23 @@ struct CaptureSummaryRow {
     captured_at_utc: DateTime<Utc>,
     file_size: i64,
     upload_state: String,
+    favorite: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, FromRow, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagRecord {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivacyAppRuleRecord {
+    pub id: String,
+    pub platform: String,
+    pub display_name: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -415,6 +436,8 @@ pub struct CaptureSummary {
     pub captured_at_utc: DateTime<Utc>,
     pub file_size: u64,
     pub upload_state: String,
+    pub favorite: bool,
+    pub tags: Vec<TagRecord>,
 }
 
 pub struct CaptureSummaryPage {
@@ -452,6 +475,8 @@ pub async fn list_capture_summaries(
     pool: &SqlitePool,
     offset: u32,
     requested_limit: Option<u16>,
+    favorite_only: bool,
+    tag_id: Option<&str>,
 ) -> Result<CaptureSummaryPage, DatabaseError> {
     let limit = requested_limit
         .unwrap_or(18)
@@ -463,6 +488,7 @@ pub async fn list_capture_summaries(
             captures.id,
             captures.captured_at_utc,
             captures.file_size,
+            captures.favorite,
             COALESCE((
                 SELECT upload_items.state
                 FROM upload_items
@@ -471,10 +497,19 @@ pub async fn list_capture_summaries(
                 LIMIT 1
             ), 'not_uploaded') AS upload_state
         FROM captures
+        WHERE (? = 0 OR captures.favorite = 1)
+          AND (? IS NULL OR EXISTS (
+              SELECT 1 FROM capture_tags
+              WHERE capture_tags.capture_id = captures.id
+                AND capture_tags.tag_id = ?
+          ))
         ORDER BY captured_at_utc DESC, id DESC
         LIMIT ? OFFSET ?
         "#,
     )
+    .bind(favorite_only)
+    .bind(tag_id)
+    .bind(tag_id)
     .bind(query_limit)
     .bind(i64::from(offset))
     .fetch_all(pool)
@@ -488,10 +523,247 @@ pub async fn list_capture_summaries(
             captured_at_utc: row.captured_at_utc,
             file_size: u64::try_from(row.file_size).map_err(|_| DatabaseError::InvalidFileSize)?,
             upload_state: row.upload_state,
+            favorite: row.favorite,
+            tags: Vec::new(),
         });
+    }
+    if !items.is_empty() {
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT capture_tags.capture_id, tags.id, tags.name \
+             FROM capture_tags JOIN tags ON tags.id = capture_tags.tag_id \
+             WHERE capture_tags.capture_id IN (",
+        );
+        let mut separated = query.separated(", ");
+        for item in &items {
+            separated.push_bind(&item.id);
+        }
+        separated.push_unseparated(") ORDER BY tags.normalized_name, tags.id");
+        let rows: Vec<(String, String, String)> = query.build_query_as().fetch_all(pool).await?;
+        let mut tags_by_capture: std::collections::HashMap<String, Vec<TagRecord>> =
+            std::collections::HashMap::new();
+        for (capture_id, id, name) in rows {
+            tags_by_capture
+                .entry(capture_id)
+                .or_default()
+                .push(TagRecord { id, name });
+        }
+        for item in &mut items {
+            item.tags = tags_by_capture.remove(&item.id).unwrap_or_default();
+        }
     }
     let next_offset = has_more.then_some(offset.saturating_add(items.len() as u32));
     Ok(CaptureSummaryPage { items, next_offset })
+}
+
+pub async fn set_capture_favorite(
+    pool: &SqlitePool,
+    capture_id: Uuid,
+    favorite: bool,
+) -> Result<(), DatabaseError> {
+    let result = sqlx::query("UPDATE captures SET favorite = ? WHERE id = ?")
+        .bind(favorite)
+        .bind(capture_id.to_string())
+        .execute(pool)
+        .await?;
+    if result.rows_affected() != 1 {
+        return Err(DatabaseError::CaptureNotFound);
+    }
+    Ok(())
+}
+
+fn normalized_tag_name(name: &str) -> Result<(String, String), DatabaseError> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 40 || name.chars().any(char::is_control) {
+        return Err(DatabaseError::InvalidTag);
+    }
+    Ok((name.to_string(), name.to_lowercase()))
+}
+
+pub async fn list_tags(pool: &SqlitePool) -> Result<Vec<TagRecord>, DatabaseError> {
+    Ok(
+        sqlx::query_as::<_, TagRecord>("SELECT id, name FROM tags ORDER BY normalized_name, id")
+            .fetch_all(pool)
+            .await?,
+    )
+}
+
+pub async fn create_tag(pool: &SqlitePool, name: &str) -> Result<TagRecord, DatabaseError> {
+    let (name, normalized_name) = normalized_tag_name(name)?;
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query(
+        "INSERT INTO tags (id, name, normalized_name, created_at_utc, updated_at_utc) \
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT(normalized_name) DO NOTHING",
+    )
+    .bind(&id)
+    .bind(&name)
+    .bind(&normalized_name)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(
+        sqlx::query_as::<_, TagRecord>("SELECT id, name FROM tags WHERE normalized_name = ?")
+            .bind(normalized_name)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+pub async fn delete_tag(pool: &SqlitePool, tag_id: Uuid) -> Result<(), DatabaseError> {
+    sqlx::query("DELETE FROM tags WHERE id = ?")
+        .bind(tag_id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_capture_tags(
+    pool: &SqlitePool,
+    capture_id: Uuid,
+    tag_ids: &[Uuid],
+) -> Result<(), DatabaseError> {
+    let unique = tag_ids.iter().copied().collect::<HashSet<_>>();
+    if unique.len() > 20 {
+        return Err(DatabaseError::InvalidTag);
+    }
+    let mut transaction = pool.begin().await?;
+    let capture_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM captures WHERE id = ?)")
+            .bind(capture_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+    if !capture_exists {
+        return Err(DatabaseError::CaptureNotFound);
+    }
+    for tag_id in &unique {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tags WHERE id = ?)")
+            .bind(tag_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+        if !exists {
+            return Err(DatabaseError::InvalidTag);
+        }
+    }
+    sqlx::query("DELETE FROM capture_tags WHERE capture_id = ?")
+        .bind(capture_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    for tag_id in unique {
+        sqlx::query(
+            "INSERT INTO capture_tags (capture_id, tag_id, created_at_utc) VALUES (?, ?, ?)",
+        )
+        .bind(capture_id.to_string())
+        .bind(tag_id.to_string())
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn list_privacy_app_rules(
+    pool: &SqlitePool,
+) -> Result<Vec<PrivacyAppRuleRecord>, DatabaseError> {
+    Ok(sqlx::query_as::<_, PrivacyAppRuleRecord>(
+        "SELECT id, platform, display_name, enabled FROM privacy_app_rules \
+         ORDER BY display_name COLLATE NOCASE, id",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn upsert_privacy_app_rule(
+    pool: &SqlitePool,
+    platform: &str,
+    app_identifier: &str,
+    display_name: &str,
+) -> Result<PrivacyAppRuleRecord, DatabaseError> {
+    if !matches!(platform, "macos" | "windows")
+        || app_identifier.is_empty()
+        || app_identifier.len() > 512
+        || display_name.trim().is_empty()
+        || display_name.chars().count() > 120
+        || app_identifier.chars().any(char::is_control)
+        || display_name.chars().any(char::is_control)
+    {
+        return Err(DatabaseError::InvalidPrivacyRule);
+    }
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query(
+        r#"
+        INSERT INTO privacy_app_rules (
+            id, platform, app_identifier, display_name, enabled,
+            created_at_utc, updated_at_utc
+        ) VALUES (?, ?, ?, ?, 1, ?, ?)
+        ON CONFLICT(platform, app_identifier) DO UPDATE SET
+            display_name = excluded.display_name,
+            enabled = 1,
+            updated_at_utc = excluded.updated_at_utc
+        "#,
+    )
+    .bind(&id)
+    .bind(platform)
+    .bind(app_identifier)
+    .bind(display_name.trim())
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(sqlx::query_as::<_, PrivacyAppRuleRecord>(
+        "SELECT id, platform, display_name, enabled FROM privacy_app_rules \
+         WHERE platform = ? AND app_identifier = ?",
+    )
+    .bind(platform)
+    .bind(app_identifier)
+    .fetch_one(pool)
+    .await?)
+}
+
+pub async fn set_privacy_app_rule_enabled(
+    pool: &SqlitePool,
+    rule_id: Uuid,
+    enabled: bool,
+) -> Result<(), DatabaseError> {
+    let result =
+        sqlx::query("UPDATE privacy_app_rules SET enabled = ?, updated_at_utc = ? WHERE id = ?")
+            .bind(enabled)
+            .bind(Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+            .bind(rule_id.to_string())
+            .execute(pool)
+            .await?;
+    if result.rows_affected() != 1 {
+        return Err(DatabaseError::CaptureNotFound);
+    }
+    Ok(())
+}
+
+pub async fn delete_privacy_app_rule(
+    pool: &SqlitePool,
+    rule_id: Uuid,
+) -> Result<(), DatabaseError> {
+    sqlx::query("DELETE FROM privacy_app_rules WHERE id = ?")
+        .bind(rule_id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn enabled_privacy_app_identifiers(
+    pool: &SqlitePool,
+    platform: &str,
+) -> Result<HashSet<String>, DatabaseError> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT app_identifier FROM privacy_app_rules WHERE enabled = 1 AND platform = ?",
+    )
+    .bind(platform)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect())
 }
 
 #[derive(Debug, FromRow)]
@@ -1349,10 +1621,14 @@ mod tests {
         assert_eq!(file.file_size, 10);
         assert_eq!(file.content_sha256, "abc");
 
-        let first = list_capture_summaries(&pool, 0, Some(1)).await.unwrap();
+        let first = list_capture_summaries(&pool, 0, Some(1), false, None)
+            .await
+            .unwrap();
         assert_eq!(first.items[0].id, newer_id.to_string());
         assert_eq!(first.next_offset, Some(1));
-        let second = list_capture_summaries(&pool, 1, Some(1)).await.unwrap();
+        let second = list_capture_summaries(&pool, 1, Some(1), false, None)
+            .await
+            .unwrap();
         assert_eq!(second.items[0].id, older_id.to_string());
         assert_eq!(second.next_offset, None);
     }
@@ -1970,5 +2246,77 @@ mod tests {
         );
         cancel_upload_batch(&pool, retry_batch.id).await.unwrap();
         delete_capture(&pool, capture_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn favorites_and_tags_filter_timeline_without_changing_capture_files() {
+        let pool = migrated_memory_pool().await;
+        let capture_id = Uuid::new_v4();
+        let captured_at = DateTime::parse_from_rfc3339("2026-08-20T01:02:03Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        insert_capture(&pool, &record(capture_id, captured_at))
+            .await
+            .unwrap();
+
+        set_capture_favorite(&pool, capture_id, true).await.unwrap();
+        let work = create_tag(&pool, " Work ").await.unwrap();
+        let same_work = create_tag(&pool, "work").await.unwrap();
+        let private = create_tag(&pool, "私密").await.unwrap();
+        assert_eq!(work.id, same_work.id);
+        set_capture_tags(
+            &pool,
+            capture_id,
+            &[
+                Uuid::parse_str(&work.id).unwrap(),
+                Uuid::parse_str(&private.id).unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let page = list_capture_summaries(&pool, 0, None, true, Some(&work.id))
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert!(page.items[0].favorite);
+        assert_eq!(page.items[0].tags.len(), 2);
+
+        delete_tag(&pool, Uuid::parse_str(&private.id).unwrap())
+            .await
+            .unwrap();
+        let page = list_capture_summaries(&pool, 0, None, false, None)
+            .await
+            .unwrap();
+        assert_eq!(page.items[0].tags, vec![work]);
+        let file = capture_file(&pool, capture_id).await.unwrap().unwrap();
+        assert_eq!(file.local_path, "captures/test.webp");
+    }
+
+    #[tokio::test]
+    async fn privacy_app_rules_are_local_toggleable_identifiers() {
+        let pool = migrated_memory_pool().await;
+        let rule =
+            upsert_privacy_app_rule(&pool, "macos", "com.example.sensitive", "Sensitive App")
+                .await
+                .unwrap();
+        assert!(rule.enabled);
+        assert!(enabled_privacy_app_identifiers(&pool, "macos")
+            .await
+            .unwrap()
+            .contains("com.example.sensitive"));
+
+        let id = Uuid::parse_str(&rule.id).unwrap();
+        set_privacy_app_rule_enabled(&pool, id, false)
+            .await
+            .unwrap();
+        assert!(enabled_privacy_app_identifiers(&pool, "macos")
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(list_privacy_app_rules(&pool).await.unwrap().len(), 1);
+
+        delete_privacy_app_rule(&pool, id).await.unwrap();
+        assert!(list_privacy_app_rules(&pool).await.unwrap().is_empty());
     }
 }

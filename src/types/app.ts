@@ -30,6 +30,7 @@ export interface AppSnapshot {
   permissionGranted: boolean;
   permissionState: PermissionState;
   lastError: string | null;
+  lastCaptureNotice: string | null;
   settings: CaptureSettings;
   launchAtLogin: boolean;
 }
@@ -45,6 +46,20 @@ export interface TimelineCapture {
     | "uploaded"
     | "failed"
     | "cancelled";
+  favorite: boolean;
+  tags: TimelineTag[];
+}
+
+export interface TimelineTag {
+  id: string;
+  name: string;
+}
+
+export interface PrivacyAppRule {
+  id: string;
+  platform: "macos" | "windows";
+  displayName: string;
+  enabled: boolean;
 }
 
 export interface RemoteProfile {

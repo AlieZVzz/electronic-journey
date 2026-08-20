@@ -108,6 +108,7 @@ export default function App() {
                     launchAtLogin={snapshot.launchAtLogin}
                     launchAtLoginSupported={desktopApi.isDesktopRuntime()}
                     pendingAction={pendingAction}
+                    lastCaptureNotice={snapshot.lastCaptureNotice}
                     onLaunchAtLoginChange={setLaunchAtLogin}
                     onSave={updateSettings}
                     settings={snapshot.settings}

@@ -13,12 +13,16 @@ describe("timeline grouping", () => {
         capturedAtUtc: "2026-07-28T15:30:00Z",
         fileSize: 10,
         uploadState: "not_uploaded" as const,
+        favorite: false,
+        tags: [],
       },
       {
         id: "two",
         capturedAtUtc: "2026-07-28T16:30:00Z",
         fileSize: 20,
         uploadState: "not_uploaded" as const,
+        favorite: false,
+        tags: [],
       },
     ];
 
@@ -33,12 +37,16 @@ describe("timeline grouping", () => {
         capturedAtUtc: "2026-07-28T12:00:00Z",
         fileSize: 10,
         uploadState: "uploaded" as const,
+        favorite: true,
+        tags: [],
       },
       {
         id: "older",
         capturedAtUtc: "2026-07-28T10:00:00Z",
         fileSize: 20,
         uploadState: "not_uploaded" as const,
+        favorite: false,
+        tags: [],
       },
     ];
 

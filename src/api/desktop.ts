@@ -5,7 +5,9 @@ import type {
   AppSnapshot,
   CaptureSettings,
   RecordingState,
+  PrivacyAppRule,
   TimelinePageResult,
+  TimelineTag,
   TimelineSelectionItem,
   RemoteConnectionTest,
   RemoteProfile,
@@ -29,6 +31,7 @@ const browserSnapshot: AppSnapshot = {
   permissionGranted: false,
   permissionState: "not_determined",
   lastError: null,
+  lastCaptureNotice: null,
   settings: defaultCaptureSettings,
   launchAtLogin: false,
 };
@@ -129,6 +132,8 @@ export const desktopApi = {
   async listTimelineCaptures(
     offset = 0,
     limit = 18,
+    favoriteOnly = false,
+    tagId: string | null = null,
   ): Promise<TimelinePageResult> {
     if (!isTauriRuntime()) {
       return { items: [], nextOffset: null };
@@ -137,7 +142,72 @@ export const desktopApi = {
     return invoke<TimelinePageResult>("list_timeline_captures", {
       offset,
       limit,
+      favoriteOnly,
+      tagId,
     });
+  },
+
+  async setTimelineCaptureFavorite(captureId: string, favorite: boolean): Promise<void> {
+    if (!isTauriRuntime()) {
+      throw new Error("收藏只能在桌面应用中修改。");
+    }
+    return invoke<void>("set_timeline_capture_favorite", { captureId, favorite });
+  },
+
+  async listTimelineTags(): Promise<TimelineTag[]> {
+    if (!isTauriRuntime()) {
+      return [];
+    }
+    return invoke<TimelineTag[]>("list_timeline_tags");
+  },
+
+  async createTimelineTag(name: string): Promise<TimelineTag> {
+    if (!isTauriRuntime()) {
+      throw new Error("标签只能在桌面应用中创建。");
+    }
+    return invoke<TimelineTag>("create_timeline_tag", { name });
+  },
+
+  async deleteTimelineTag(tagId: string): Promise<void> {
+    if (!isTauriRuntime()) {
+      throw new Error("标签只能在桌面应用中删除。");
+    }
+    return invoke<void>("delete_timeline_tag", { tagId });
+  },
+
+  async setTimelineCaptureTags(captureId: string, tagIds: string[]): Promise<void> {
+    if (!isTauriRuntime()) {
+      throw new Error("标签只能在桌面应用中修改。");
+    }
+    return invoke<void>("set_timeline_capture_tags", { captureId, tagIds });
+  },
+
+  async listPrivacyAppRules(): Promise<PrivacyAppRule[]> {
+    if (!isTauriRuntime()) {
+      return [];
+    }
+    return invoke<PrivacyAppRule[]>("list_privacy_app_rules");
+  },
+
+  async addFrontmostPrivacyAppRule(): Promise<PrivacyAppRule> {
+    if (!isTauriRuntime()) {
+      throw new Error("隐私应用排除只支持 macOS 和 Windows 桌面应用。");
+    }
+    return invoke<PrivacyAppRule>("add_frontmost_privacy_app_rule");
+  },
+
+  async setPrivacyAppRuleEnabled(ruleId: string, enabled: boolean): Promise<void> {
+    if (!isTauriRuntime()) {
+      throw new Error("隐私应用排除只支持桌面应用。");
+    }
+    return invoke<void>("set_privacy_app_rule_enabled", { ruleId, enabled });
+  },
+
+  async deletePrivacyAppRule(ruleId: string): Promise<void> {
+    if (!isTauriRuntime()) {
+      throw new Error("隐私应用排除只支持桌面应用。");
+    }
+    return invoke<void>("delete_privacy_app_rule", { ruleId });
   },
 
   async listTimelineDaySelection(

@@ -82,3 +82,77 @@ mod tests {
         );
     }
 }
+use serde::Serialize;
+use thiserror::Error;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod unsupported;
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationIdentity {
+    pub platform: String,
+    pub identifier: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Error)]
+pub enum ApplicationIdentityError {
+    #[error("frontmost application is unavailable")]
+    Unavailable,
+    #[error("frontmost application identity is invalid")]
+    Invalid,
+}
+
+pub fn current_platform() -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        Some("macos")
+    } else if cfg!(target_os = "windows") {
+        Some("windows")
+    } else {
+        None
+    }
+}
+
+pub fn frontmost_application() -> Result<ApplicationIdentity, ApplicationIdentityError> {
+    #[cfg(target_os = "macos")]
+    return macos::frontmost_application();
+    #[cfg(target_os = "windows")]
+    return windows::frontmost_application();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    return unsupported::frontmost_application();
+}
+
+pub fn application_is_allowed(
+    excluded_identifiers: &std::collections::HashSet<String>,
+    application: &ApplicationIdentity,
+) -> bool {
+    current_platform().is_some_and(|platform| {
+        application.platform == platform && !excluded_identifiers.contains(&application.identifier)
+    })
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+mod application_tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn excluded_application_identity_is_blocked_without_using_display_name() {
+        let platform = current_platform().expect("desktop tests run on a supported platform");
+        let application = ApplicationIdentity {
+            platform: platform.to_string(),
+            identifier: "stable.application.id".to_string(),
+            display_name: "Sensitive Window Title Must Not Matter".to_string(),
+        };
+        let excluded = HashSet::from([application.identifier.clone()]);
+
+        assert!(!application_is_allowed(&excluded, &application));
+        assert!(application_is_allowed(&HashSet::new(), &application));
+    }
+}

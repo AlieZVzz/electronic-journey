@@ -21,13 +21,40 @@ use tauri::Manager;
 
 static STARTUP_STARTED: OnceLock<Instant> = OnceLock::new();
 
-pub(crate) fn trace_startup(stage: &str) {
+#[derive(Clone, Copy)]
+pub(crate) enum StartupStage {
+    ProcessEntered,
+    SetupEntered,
+    DatabaseReady,
+    PageLoaded,
+    BackgroundRecoveryFinished,
+    CachedSnapshotRequested,
+    PermissionRefreshStarted,
+    PermissionRefreshFinished,
+}
+
+impl StartupStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessEntered => "process entered",
+            Self::SetupEntered => "setup entered",
+            Self::DatabaseReady => "database ready",
+            Self::PageLoaded => "page loaded",
+            Self::BackgroundRecoveryFinished => "background recovery finished",
+            Self::CachedSnapshotRequested => "cached snapshot requested",
+            Self::PermissionRefreshStarted => "permission refresh started",
+            Self::PermissionRefreshFinished => "permission refresh finished",
+        }
+    }
+}
+
+pub(crate) fn trace_startup(stage: StartupStage) {
     if std::env::var_os("ELECTRONIC_JOURNEY_STARTUP_TRACE").is_some() {
         let elapsed = STARTUP_STARTED
             .get_or_init(Instant::now)
             .elapsed()
             .as_millis();
-        eprintln!("startup {stage}: {elapsed} ms");
+        eprintln!("startup {}: {} ms", stage.as_str(), elapsed);
     }
 }
 
@@ -57,20 +84,20 @@ fn spawn_startup_recovery(app_handle: tauri::AppHandle) {
                 .state::<RuntimeState>()
                 .set_startup_recovery_error();
         }
-        trace_startup("background recovery finished");
+        trace_startup(StartupStage::BackgroundRecoveryFinished);
     });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     STARTUP_STARTED.get_or_init(Instant::now);
-    trace_startup("process entered");
+    trace_startup(StartupStage::ProcessEntered);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(RuntimeState::default())
         .manage(upload::UploadDiagnosticsRegistry::default())
         .setup(|app| {
-            trace_startup("setup entered");
+            trace_startup(StartupStage::SetupEntered);
             #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {
                 window.set_decorations(false)?;
@@ -108,14 +135,14 @@ pub fn run() {
             }
             system_monitor::start(app.handle());
             auto_sync::spawn_scheduler(app.handle().clone());
-            trace_startup("database ready");
+            trace_startup(StartupStage::DatabaseReady);
             Ok(())
         })
         .on_page_load(|webview, payload| {
             if webview.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
             {
-                trace_startup("page loaded");
+                trace_startup(StartupStage::PageLoaded);
                 spawn_startup_recovery(webview.app_handle().clone());
             }
         })
@@ -137,6 +164,15 @@ pub fn run() {
             commands::delete_timeline_capture,
             commands::list_timeline_day_selection,
             commands::list_timeline_captures,
+            commands::set_timeline_capture_favorite,
+            commands::list_timeline_tags,
+            commands::create_timeline_tag,
+            commands::delete_timeline_tag,
+            commands::set_timeline_capture_tags,
+            commands::list_privacy_app_rules,
+            commands::add_frontmost_privacy_app_rule,
+            commands::set_privacy_app_rule_enabled,
+            commands::delete_privacy_app_rule,
             commands::pick_private_key_file,
             commands::read_timeline_capture,
             commands::read_timeline_thumbnail,
@@ -155,3 +191,6 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("failed to run Electronic Journey");
 }
+
+#[cfg(test)]
+mod log_leakage_tests;

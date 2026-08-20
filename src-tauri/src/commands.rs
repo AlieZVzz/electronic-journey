@@ -17,7 +17,7 @@ use crate::{
     capture::{
         CaptureError, DisplayId, DisplayInfo, PermissionState, PlatformCapture, ScreenCapture,
     },
-    capture_pipeline,
+    capture_pipeline, database,
     error::AppError,
     privacy::{self, CaptureDecision, PrivacyContext, PrivacyReason},
     scheduler::{next_capture_at, DEFAULT_CAPTURE_INTERVAL_MINUTES, FIRST_CAPTURE_DELAY},
@@ -125,6 +125,7 @@ pub struct AppSnapshot {
     permission_granted: bool,
     permission_state: PermissionState,
     last_error: Option<String>,
+    last_capture_notice: Option<String>,
     settings: CaptureSettings,
     launch_at_login: bool,
 }
@@ -141,6 +142,7 @@ impl Default for AppSnapshot {
             permission_granted: false,
             permission_state: PermissionState::NotDetermined,
             last_error: None,
+            last_capture_notice: None,
             settings: CaptureSettings::default(),
             launch_at_login: false,
         }
@@ -293,6 +295,7 @@ impl RuntimeState {
         };
         snapshot.suspension_reason = suspension_reason;
         snapshot.last_error = None;
+        snapshot.last_capture_notice = None;
         snapshot.next_capture_at = match snapshot.state {
             RecordingState::Running => {
                 Some(next_capture_at(Utc::now(), FIRST_CAPTURE_DELAY).to_rfc3339())
@@ -444,6 +447,7 @@ impl RuntimeState {
             return None;
         }
         snapshot.last_error = None;
+        snapshot.last_capture_notice = None;
         let delay = StdDuration::from_secs(u64::from(snapshot.settings.interval_minutes) * 60);
         snapshot.next_capture_at = Some(next_capture_at(Utc::now(), delay).to_rfc3339());
         Some(delay)
@@ -457,6 +461,22 @@ impl RuntimeState {
         self.capture_completed(generation)
     }
 
+    fn capture_skipped_for_privacy(&self, generation: u64) -> Option<StdDuration> {
+        if self.schedule_generation.load(Ordering::SeqCst) != generation {
+            return None;
+        }
+        let mut snapshot = self.snapshot.lock().ok()?;
+        if !matches!(snapshot.state, RecordingState::Running) {
+            return None;
+        }
+        snapshot.last_error = None;
+        snapshot.last_capture_notice =
+            Some("隐私应用处于前台或无法确认前台应用，本周期未保存截图。".into());
+        let delay = StdDuration::from_secs(u64::from(snapshot.settings.interval_minutes) * 60);
+        snapshot.next_capture_at = Some(next_capture_at(Utc::now(), delay).to_rfc3339());
+        Some(delay)
+    }
+
     fn capture_failed(&self, generation: u64, message: String, permission_denied: bool) {
         if self.schedule_generation.load(Ordering::SeqCst) != generation {
             return;
@@ -466,6 +486,7 @@ impl RuntimeState {
             snapshot.suspension_reason = None;
             snapshot.next_capture_at = None;
             snapshot.last_error = Some(message);
+            snapshot.last_capture_notice = None;
             if permission_denied {
                 snapshot.permission_granted = false;
                 snapshot.permission_state = PermissionState::Denied;
@@ -656,9 +677,13 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
             };
 
             let pool = app.state::<SqlitePool>();
+            let mut privacy_skipped = !privacy_allows_capture(pool.inner()).await;
             let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "Etc/Unknown".into());
             let mut stored_any = false;
             for display in displays {
+                if privacy_skipped {
+                    break;
+                }
                 if !runtime.schedule_is_active(generation) {
                     return;
                 }
@@ -683,6 +708,11 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
                         return;
                     }
                 };
+                if !privacy_allows_capture(pool.inner()).await {
+                    captured.rgba.zeroize();
+                    privacy_skipped = true;
+                    break;
+                }
                 captured.comparison_exclusions = PlatformCapture
                     .comparison_exclusions(&app, &display.id, captured.width, captured.height)
                     .await;
@@ -714,7 +744,9 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
                 }
             }
 
-            let next_delay = if stored_any {
+            let next_delay = if privacy_skipped {
+                runtime.capture_skipped_for_privacy(generation)
+            } else if stored_any {
                 runtime.capture_succeeded(generation)
             } else {
                 runtime.capture_skipped(generation)
@@ -730,13 +762,30 @@ fn spawn_capture_loop(app: AppHandle, generation: u64, first_delay: StdDuration)
     });
 }
 
+async fn privacy_allows_capture(pool: &SqlitePool) -> bool {
+    let Some(platform) = privacy::current_platform() else {
+        return true;
+    };
+    let identifiers = match database::enabled_privacy_app_identifiers(pool, platform).await {
+        Ok(identifiers) => identifiers,
+        Err(_) => return false,
+    };
+    if identifiers.is_empty() {
+        return true;
+    }
+    match privacy::frontmost_application() {
+        Ok(application) => privacy::application_is_allowed(&identifiers, &application),
+        Err(_) => false,
+    }
+}
+
 #[tauri::command]
 pub async fn get_app_snapshot(
     app: AppHandle,
     state: State<'_, RuntimeState>,
     pool: State<'_, SqlitePool>,
 ) -> Result<AppSnapshot, String> {
-    crate::trace_startup("cached snapshot requested");
+    crate::trace_startup(crate::StartupStage::CachedSnapshotRequested);
     refresh_local_inventory(&app, false)
         .await
         .map_err(|_| "无法验证本地截图统计，请稍后重试。".to_string())?;
@@ -766,13 +815,13 @@ pub async fn refresh_screen_capture_permission(
     app: AppHandle,
     state: State<'_, RuntimeState>,
 ) -> Result<AppSnapshot, String> {
-    crate::trace_startup("permission refresh started");
+    crate::trace_startup(crate::StartupStage::PermissionRefreshStarted);
     let permission_result = PlatformCapture.permission_state().await;
     let snapshot = state
         .update_permission(permission_result)
         .map_err(|error| error.to_string())?;
     crate::tray::refresh(&app);
-    crate::trace_startup("permission refresh finished");
+    crate::trace_startup(crate::StartupStage::PermissionRefreshFinished);
     Ok(snapshot)
 }
 
@@ -854,10 +903,144 @@ pub async fn list_timeline_captures(
     pool: State<'_, SqlitePool>,
     offset: u32,
     limit: Option<u16>,
+    favorite_only: Option<bool>,
+    tag_id: Option<String>,
 ) -> Result<timeline::TimelinePage, String> {
-    timeline::list_captures(pool.inner(), offset, limit)
+    if tag_id
+        .as_deref()
+        .is_some_and(|value| uuid::Uuid::parse_str(value).is_err())
+    {
+        return Err("标签标识无效。".to_string());
+    }
+    timeline::list_captures(
+        pool.inner(),
+        offset,
+        limit,
+        favorite_only.unwrap_or(false),
+        tag_id.as_deref(),
+    )
+    .await
+    .map_err(|_| "无法读取本地时间线，请稍后重试。".to_string())
+}
+
+#[tauri::command]
+pub async fn set_timeline_capture_favorite(
+    pool: State<'_, SqlitePool>,
+    capture_id: String,
+    favorite: bool,
+) -> Result<(), String> {
+    let capture_id =
+        uuid::Uuid::parse_str(&capture_id).map_err(|_| "截图标识无效。".to_string())?;
+    database::set_capture_favorite(pool.inner(), capture_id, favorite)
         .await
-        .map_err(|_| "无法读取本地时间线，请稍后重试。".to_string())
+        .map_err(|error| match error {
+            database::DatabaseError::CaptureNotFound => "截图不存在或已经被删除。".to_string(),
+            _ => "无法更新收藏状态。".to_string(),
+        })
+}
+
+#[tauri::command]
+pub async fn list_timeline_tags(
+    pool: State<'_, SqlitePool>,
+) -> Result<Vec<database::TagRecord>, String> {
+    database::list_tags(pool.inner())
+        .await
+        .map_err(|_| "无法读取标签。".to_string())
+}
+
+#[tauri::command]
+pub async fn create_timeline_tag(
+    pool: State<'_, SqlitePool>,
+    name: String,
+) -> Result<database::TagRecord, String> {
+    database::create_tag(pool.inner(), &name)
+        .await
+        .map_err(|error| match error {
+            database::DatabaseError::InvalidTag => {
+                "标签名称应为 1 至 40 个非控制字符。".to_string()
+            }
+            _ => "无法创建标签。".to_string(),
+        })
+}
+
+#[tauri::command]
+pub async fn delete_timeline_tag(
+    pool: State<'_, SqlitePool>,
+    tag_id: String,
+) -> Result<(), String> {
+    let tag_id = uuid::Uuid::parse_str(&tag_id).map_err(|_| "标签标识无效。".to_string())?;
+    database::delete_tag(pool.inner(), tag_id)
+        .await
+        .map_err(|_| "无法删除标签。".to_string())
+}
+
+#[tauri::command]
+pub async fn set_timeline_capture_tags(
+    pool: State<'_, SqlitePool>,
+    capture_id: String,
+    tag_ids: Vec<String>,
+) -> Result<(), String> {
+    let capture_id =
+        uuid::Uuid::parse_str(&capture_id).map_err(|_| "截图标识无效。".to_string())?;
+    let tag_ids = tag_ids
+        .into_iter()
+        .map(|value| uuid::Uuid::parse_str(&value).map_err(|_| "标签标识无效。".to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    database::set_capture_tags(pool.inner(), capture_id, &tag_ids)
+        .await
+        .map_err(|error| match error {
+            database::DatabaseError::CaptureNotFound => "截图不存在或已经被删除。".to_string(),
+            database::DatabaseError::InvalidTag => "标签选择无效或超过 20 个。".to_string(),
+            _ => "无法更新截图标签。".to_string(),
+        })
+}
+
+#[tauri::command]
+pub async fn list_privacy_app_rules(
+    pool: State<'_, SqlitePool>,
+) -> Result<Vec<database::PrivacyAppRuleRecord>, String> {
+    database::list_privacy_app_rules(pool.inner())
+        .await
+        .map_err(|_| "无法读取隐私应用规则。".to_string())
+}
+
+#[tauri::command]
+pub async fn add_frontmost_privacy_app_rule(
+    pool: State<'_, SqlitePool>,
+) -> Result<database::PrivacyAppRuleRecord, String> {
+    let application = privacy::frontmost_application()
+        .map_err(|_| "无法识别当前前台应用；请切换到目标应用后重试。".to_string())?;
+    database::upsert_privacy_app_rule(
+        pool.inner(),
+        &application.platform,
+        &application.identifier,
+        &application.display_name,
+    )
+    .await
+    .map_err(|_| "无法保存隐私应用规则。".to_string())
+}
+
+#[tauri::command]
+pub async fn set_privacy_app_rule_enabled(
+    pool: State<'_, SqlitePool>,
+    rule_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let rule_id = uuid::Uuid::parse_str(&rule_id).map_err(|_| "隐私规则标识无效。".to_string())?;
+    database::set_privacy_app_rule_enabled(pool.inner(), rule_id, enabled)
+        .await
+        .map_err(|_| "无法更新隐私应用规则。".to_string())
+}
+
+#[tauri::command]
+pub async fn delete_privacy_app_rule(
+    pool: State<'_, SqlitePool>,
+    rule_id: String,
+) -> Result<(), String> {
+    let rule_id = uuid::Uuid::parse_str(&rule_id).map_err(|_| "隐私规则标识无效。".to_string())?;
+    database::delete_privacy_app_rule(pool.inner(), rule_id)
+        .await
+        .map_err(|_| "无法删除隐私应用规则。".to_string())
 }
 
 #[tauri::command]
@@ -1691,6 +1874,22 @@ mod tests {
         assert_eq!(snapshot.local_storage_bytes, 600);
         assert!(snapshot.next_capture_at.is_some());
         assert!(matches!(snapshot.state, RecordingState::Running));
+    }
+
+    #[test]
+    fn privacy_skip_keeps_recording_and_exposes_only_a_fixed_notice() {
+        let runtime = RuntimeState::from_permission_result(Ok(PermissionState::Granted));
+        let (_, generation, _) = runtime.set_state(RecordingState::Running).unwrap();
+
+        assert!(runtime.capture_skipped_for_privacy(generation).is_some());
+        let snapshot = runtime.snapshot().unwrap();
+        assert_eq!(snapshot.state, RecordingState::Running);
+        assert_eq!(
+            snapshot.last_capture_notice.as_deref(),
+            Some("隐私应用处于前台或无法确认前台应用，本周期未保存截图。")
+        );
+        assert!(snapshot.last_error.is_none());
+        assert!(snapshot.next_capture_at.is_some());
     }
 
     #[test]

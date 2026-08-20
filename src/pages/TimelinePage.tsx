@@ -19,6 +19,7 @@ import {
 } from "../lib/uploadProgress";
 import type {
   TimelineCapture,
+  TimelineTag,
   UploadBatchProgress,
 } from "../types/app";
 
@@ -145,6 +146,9 @@ function TimelineThumbnail({ captureId }: { captureId: string }) {
 
 export function TimelinePage() {
   const [captures, setCaptures] = useState<TimelineCapture[]>([]);
+  const [tags, setTags] = useState<TimelineTag[]>([]);
+  const [favoriteOnly, setFavoriteOnly] = useState(false);
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingAction, setLoadingAction] = useState<
@@ -280,7 +284,12 @@ export function TimelinePage() {
       setError(null);
       setActionMessage(null);
       try {
-        const page = await desktopApi.listTimelineCaptures(offset);
+        const page = await desktopApi.listTimelineCaptures(
+          offset,
+          18,
+          favoriteOnly,
+          tagFilter,
+        );
         setCaptures((current) => {
           if (replace) {
             return page.items;
@@ -310,7 +319,7 @@ export function TimelinePage() {
         setLoadingAction(null);
       }
     },
-    [],
+    [favoriteOnly, tagFilter],
   );
 
   const applyUploadProgress = useCallback(
@@ -333,6 +342,114 @@ export function TimelinePage() {
   useEffect(() => {
     void loadPage(0, true, "initial");
   }, [loadPage]);
+
+  useEffect(() => {
+    void desktopApi
+      .listTimelineTags()
+      .then(setTags)
+      .catch((reason) => setError(String(reason)));
+  }, []);
+
+  async function toggleFavorite(capture: TimelineCapture) {
+    const favorite = !capture.favorite;
+    setError(null);
+    setCaptures((current) =>
+      current.map((item) =>
+        item.id === capture.id ? { ...item, favorite } : item,
+      ),
+    );
+    try {
+      await desktopApi.setTimelineCaptureFavorite(capture.id, favorite);
+      if (favoriteOnly && !favorite) {
+        setCaptures((current) =>
+          current.filter((item) => item.id !== capture.id),
+        );
+      }
+      setActionMessage(favorite ? "已加入收藏。" : "已取消收藏。");
+    } catch (reason) {
+      setCaptures((current) =>
+        current.map((item) =>
+          item.id === capture.id
+            ? { ...item, favorite: capture.favorite }
+            : item,
+        ),
+      );
+      setError(String(reason));
+    }
+  }
+
+  async function editCaptureTags(capture: TimelineCapture) {
+    const input = window.prompt(
+      "输入标签，用逗号分隔；清空可移除全部标签。",
+      capture.tags.map((tag) => tag.name).join(", "),
+    );
+    if (input === null) {
+      return;
+    }
+    const names = Array.from(
+      new Map(
+        input
+          .split(/[,，]/)
+          .map((name) => name.trim())
+          .filter(Boolean)
+          .map((name) => [name.toLocaleLowerCase(), name]),
+      ).values(),
+    );
+    if (names.length > 20) {
+      setError("每张截图最多添加 20 个标签。");
+      return;
+    }
+    setError(null);
+    try {
+      const resolved = await Promise.all(
+        names.map((name) => desktopApi.createTimelineTag(name)),
+      );
+      await desktopApi.setTimelineCaptureTags(
+        capture.id,
+        resolved.map((tag) => tag.id),
+      );
+      const allTags = await desktopApi.listTimelineTags();
+      setTags(allTags);
+      setCaptures((current) =>
+        current.map((item) =>
+          item.id === capture.id ? { ...item, tags: resolved } : item,
+        ),
+      );
+      if (tagFilter && !resolved.some((tag) => tag.id === tagFilter)) {
+        setCaptures((current) =>
+          current.filter((item) => item.id !== capture.id),
+        );
+      }
+      setActionMessage("截图标签已更新。");
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function deleteSelectedTag() {
+    if (!tagFilter) {
+      return;
+    }
+    const tag = tags.find((item) => item.id === tagFilter);
+    if (!tag || !window.confirm(`删除标签“${tag.name}”？截图本身不会被删除。`)) {
+      return;
+    }
+    setError(null);
+    try {
+      await desktopApi.deleteTimelineTag(tag.id);
+      setTags((current) => current.filter((item) => item.id !== tag.id));
+      setCaptures((current) =>
+        current.map((capture) => ({
+          ...capture,
+          tags: capture.tags.filter((item) => item.id !== tag.id),
+        })),
+      );
+      setTagFilter(null);
+      setActionMessage(`标签“${tag.name}”已删除；截图未受影响。`);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -901,6 +1018,33 @@ export function TimelinePage() {
           <p>按当前系统时区排列；缩略图和原图都从本地读取。</p>
         </div>
         <div className="timeline-header__actions">
+          <label className="timeline-filter-toggle">
+            <input
+              checked={favoriteOnly}
+              onChange={(event) => setFavoriteOnly(event.currentTarget.checked)}
+              type="checkbox"
+            />
+            仅看收藏
+          </label>
+          <select
+            aria-label="按标签筛选"
+            onChange={(event) => setTagFilter(event.currentTarget.value || null)}
+            value={tagFilter ?? ""}
+          >
+            <option value="">全部标签</option>
+            {tags.map((tag) => (
+              <option key={tag.id} value={tag.id}>{tag.name}</option>
+            ))}
+          </select>
+          {tagFilter && (
+            <button
+              className="button button--ghost"
+              onClick={() => void deleteSelectedTag()}
+              type="button"
+            >
+              删除当前标签
+            </button>
+          )}
           <span aria-live="polite">
             {selectedIds.size > 0
               ? `已选 ${selectedIds.size} 张`
@@ -967,8 +1111,8 @@ export function TimelinePage() {
       ) : captures.length === 0 ? (
         <div className="empty-canvas timeline-empty">
           <span aria-hidden="true">≋</span>
-          <strong>时间线尚无记录</strong>
-          <p>开始记录并完成第一张截图后，它会出现在这里。</p>
+          <strong>{favoriteOnly || tagFilter ? "没有符合筛选的截图" : "时间线尚无记录"}</strong>
+          <p>{favoriteOnly || tagFilter ? "调整收藏或标签筛选后再试。" : "开始记录并完成第一张截图后，它会出现在这里。"}</p>
         </div>
       ) : (
         <div className="timeline-groups" aria-busy={loading}>
@@ -1029,6 +1173,15 @@ export function TimelinePage() {
                         </span>
                       )}
                       <button
+                        aria-label={capture.favorite ? "取消收藏" : "加入收藏"}
+                        className={`timeline-card__favorite${capture.favorite ? " is-active" : ""}`}
+                        onClick={() => void toggleFavorite(capture)}
+                        title={capture.favorite ? "取消收藏" : "加入收藏"}
+                        type="button"
+                      >
+                        {capture.favorite ? "★" : "☆"}
+                      </button>
+                      <button
                         aria-label={`查看 ${formatTime(capture.capturedAtUtc)} 的截图`}
                         className="timeline-card"
                         onClick={() => void openPreview(capture)}
@@ -1060,6 +1213,14 @@ export function TimelinePage() {
                           <small>
                             {formatBytes(capture.fileSize)} · 本地图片
                           </small>
+                          {capture.tags.length > 0 && (
+                            <span className="timeline-card__tags">
+                              {capture.tags.slice(0, 3).map((tag) => (
+                                <em key={tag.id}>{tag.name}</em>
+                              ))}
+                              {capture.tags.length > 3 && <em>+{capture.tags.length - 3}</em>}
+                            </span>
+                          )}
                         </span>
                       </button>
                     </div>
@@ -1212,6 +1373,28 @@ export function TimelinePage() {
             {selectedIds.has(contextMenu.capture.id)
               ? "取消选择"
               : "选择用于上传"}
+          </button>
+          <button
+            onClick={() => {
+              const { capture } = contextMenu;
+              setContextMenu(null);
+              void toggleFavorite(capture);
+            }}
+            role="menuitem"
+            type="button"
+          >
+            {contextMenu.capture.favorite ? "取消收藏" : "加入收藏"}
+          </button>
+          <button
+            onClick={() => {
+              const { capture } = contextMenu;
+              setContextMenu(null);
+              void editCaptureTags(capture);
+            }}
+            role="menuitem"
+            type="button"
+          >
+            编辑标签…
           </button>
           <button
             className="is-danger"
