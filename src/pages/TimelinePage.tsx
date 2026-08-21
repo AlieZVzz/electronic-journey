@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { desktopApi } from "../api/desktop";
+import { SelectControl } from "../components/SelectControl";
 import {
   addTimelineSelection,
   groupTimelineCaptures,
@@ -25,6 +26,11 @@ import type {
 
 const MAX_PREVIEW_CACHE_ITEMS = 3;
 const MAX_PREVIEW_CACHE_BYTES = 48 * 1024 * 1024;
+
+const favoriteFilterOptions = [
+  { label: "全部截图", value: "all" },
+  { label: "仅看收藏", value: "favorites" },
+] as const;
 
 type PreviewCacheEntry = {
   url: string;
@@ -193,6 +199,13 @@ export function TimelinePage() {
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const deleteCancelButtonRef = useRef<HTMLButtonElement | null>(null);
   const groups = useMemo(() => groupTimelineCaptures(captures), [captures]);
+  const tagFilterOptions = useMemo(
+    () => [
+      { label: "全部标签", value: "" },
+      ...tags.map((tag) => ({ label: tag.name, value: tag.id })),
+    ],
+    [tags],
+  );
   const selectedIds = useMemo(
     () => new Set(selectedItems.keys()),
     [selectedItems],
@@ -1018,24 +1031,22 @@ export function TimelinePage() {
           <p>按当前系统时区排列；缩略图和原图都从本地读取。</p>
         </div>
         <div className="timeline-header__actions">
-          <label className="timeline-filter-toggle">
-            <input
-              checked={favoriteOnly}
-              onChange={(event) => setFavoriteOnly(event.currentTarget.checked)}
-              type="checkbox"
+          <span className="timeline-filter-control">
+            <SelectControl<string>
+              ariaLabel="收藏筛选"
+              onChange={(value) => setFavoriteOnly(value === "favorites")}
+              options={favoriteFilterOptions}
+              value={favoriteOnly ? "favorites" : "all"}
             />
-            仅看收藏
-          </label>
-          <select
-            aria-label="按标签筛选"
-            onChange={(event) => setTagFilter(event.currentTarget.value || null)}
-            value={tagFilter ?? ""}
-          >
-            <option value="">全部标签</option>
-            {tags.map((tag) => (
-              <option key={tag.id} value={tag.id}>{tag.name}</option>
-            ))}
-          </select>
+          </span>
+          <span className="timeline-filter-control timeline-filter-control--tags">
+            <SelectControl<string>
+              ariaLabel="标签筛选"
+              onChange={(value) => setTagFilter(value || null)}
+              options={tagFilterOptions}
+              value={tagFilter ?? ""}
+            />
+          </span>
           {tagFilter && (
             <button
               className="button button--ghost"
@@ -1045,7 +1056,7 @@ export function TimelinePage() {
               删除当前标签
             </button>
           )}
-          <span aria-live="polite">
+          <span aria-live="polite" className="timeline-selection-status">
             {selectedIds.size > 0
               ? `已选 ${selectedIds.size} 张`
               : "尚未选择"}
@@ -1165,22 +1176,24 @@ export function TimelinePage() {
                         />
                         <span aria-hidden="true" />
                       </label>
-                      {stateLabel && (
-                        <span
-                          className={`timeline-card__upload-state is-${capture.uploadState}`}
+                      <div className="timeline-card__badges">
+                        {stateLabel && (
+                          <span
+                            className={`timeline-card__upload-state is-${capture.uploadState}`}
+                          >
+                            {stateLabel}
+                          </span>
+                        )}
+                        <button
+                          aria-label={capture.favorite ? "取消收藏" : "加入收藏"}
+                          className={`timeline-card__favorite${capture.favorite ? " is-active" : ""}`}
+                          onClick={() => void toggleFavorite(capture)}
+                          title={capture.favorite ? "取消收藏" : "加入收藏"}
+                          type="button"
                         >
-                          {stateLabel}
-                        </span>
-                      )}
-                      <button
-                        aria-label={capture.favorite ? "取消收藏" : "加入收藏"}
-                        className={`timeline-card__favorite${capture.favorite ? " is-active" : ""}`}
-                        onClick={() => void toggleFavorite(capture)}
-                        title={capture.favorite ? "取消收藏" : "加入收藏"}
-                        type="button"
-                      >
-                        {capture.favorite ? "★" : "☆"}
-                      </button>
+                          {capture.favorite ? "★" : "☆"}
+                        </button>
+                      </div>
                       <button
                         aria-label={`查看 ${formatTime(capture.capturedAtUtc)} 的截图`}
                         className="timeline-card"

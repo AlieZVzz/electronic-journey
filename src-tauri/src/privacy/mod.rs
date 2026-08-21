@@ -83,6 +83,7 @@ mod tests {
     }
 }
 use serde::Serialize;
+use std::path::Path;
 use thiserror::Error;
 
 #[cfg(target_os = "macos")]
@@ -106,6 +107,8 @@ pub enum ApplicationIdentityError {
     Unavailable,
     #[error("frontmost application identity is invalid")]
     Invalid,
+    #[error("selected application is not supported")]
+    UnsupportedSelection,
 }
 
 pub fn current_platform() -> Option<&'static str> {
@@ -125,6 +128,17 @@ pub fn frontmost_application() -> Result<ApplicationIdentity, ApplicationIdentit
     return windows::frontmost_application();
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     return unsupported::frontmost_application();
+}
+
+pub fn application_identity_from_path(
+    path: &Path,
+) -> Result<ApplicationIdentity, ApplicationIdentityError> {
+    #[cfg(target_os = "macos")]
+    return macos::application_identity_from_path(path);
+    #[cfg(target_os = "windows")]
+    return windows::application_identity_from_path(path);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    return unsupported::application_identity_from_path(path);
 }
 
 pub fn application_is_allowed(

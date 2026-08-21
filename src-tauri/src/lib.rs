@@ -170,7 +170,7 @@ pub fn run() {
             commands::delete_timeline_tag,
             commands::set_timeline_capture_tags,
             commands::list_privacy_app_rules,
-            commands::add_frontmost_privacy_app_rule,
+            commands::pick_privacy_application_rule,
             commands::set_privacy_app_rule_enabled,
             commands::delete_privacy_app_rule,
             commands::pick_private_key_file,

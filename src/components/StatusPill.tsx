@@ -10,7 +10,11 @@ const labels: Record<RecordingState, string> = {
 
 export function StatusPill({ state }: { state: RecordingState }) {
   return (
-    <span className={`status-pill status-pill--${state}`}>
+    <span
+      aria-label={`记录状态：${labels[state]}`}
+      className={`status-pill status-pill--${state}`}
+      role="status"
+    >
       <i aria-hidden="true" />
       {labels[state]}
     </span>

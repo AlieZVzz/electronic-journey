@@ -98,7 +98,7 @@ Rust 核心可以访问应用专用图片目录、SQLite、用户通过原生文
 - 托盘开始操作复用与主窗口相同的 Rust 状态机。缺少权限时不得绕过首次授权说明直接触发系统流程，而是打开主窗口并提示用户在那里完成知情授权。
 - 关闭主窗口只隐藏窗口并保留可见托盘；真正退出必须使用托盘“退出 Electronic Journey”或系统退出命令。
 - SFTP 配置是可选项，不影响本地记录能力。
-- 隐私中心允许用户在三秒倒计时后切换到目标应用，由 Rust 读取稳定的前台应用身份并加入排除规则；规则可以停用或移除。
+- 隐私中心通过系统原生选择器添加排除应用：macOS 默认打开 `/Applications` 并接受有效 `.app`，Windows 默认打开 Program Files 并接受有效 `.exe`；Rust 提取与前台检测一致的稳定身份，规则可以停用或移除。
 - 启用规则命中前台应用时跳过截图周期，不保存、不补拍、不上传；身份或规则读取失败时同样安全跳过本周期并显示固定的非敏感提示。
 - 当前只实现前台应用整周期排除，不实现可见窗口矩形或像素遮挡。
 
@@ -246,7 +246,7 @@ SFTP v3 不提供通用远端 SHA-256，因此第一期验证传输前本地 SHA
 - `set_launch_at_login(enabled)`：设置当前用户的开机自启动，并返回包含 `launchAtLogin` 的运行快照。
 - `set_timeline_capture_favorite(capture_id, favorite)`：幂等更新本地收藏状态；
 - `list_timeline_tags()`、`create_timeline_tag(name)`、`delete_timeline_tag(tag_id)` 与 `set_timeline_capture_tags(capture_id, tag_ids)`：管理本地标签和截图关系；
-- `list_privacy_app_rules()`、`add_frontmost_privacy_app_rule()`、`set_privacy_app_rule_enabled(rule_id, enabled)` 与 `delete_privacy_app_rule(rule_id)`：管理由 Rust 识别的前台应用排除规则。
+- `list_privacy_app_rules()`、`pick_privacy_application_rule()`、`set_privacy_app_rule_enabled(rule_id, enabled)` 与 `delete_privacy_app_rule(rule_id)`：通过系统选择器管理由 Rust 验证的应用排除规则。
 
 命令不接受私钥正文、本地图片路径、任意远端路径、shell 命令、Hermes 配置、提示词或模型参数。
 
@@ -267,7 +267,7 @@ SFTP v3 不提供通用远端 SHA-256，因此第一期验证传输前本地 SHA
 
 Rust 和 SQLite 测试覆盖输入验证、路径逃逸、迁移、批次上限、确定性文件名、上传状态与删除互锁。前端检查覆盖浏览器 fallback、全选范围、上传确认、自动同步默认关闭与开启告知、间隔配置、重复提交、结果文案和口令不回显。
 
-收藏、标签与应用排除测试覆盖旧记录迁移、收藏和标签筛选、标签规范化与级联删除、规则启停、稳定身份匹配、身份读取失败时跳过，以及元数据不改变图片文件和上传输入。macOS 与 Windows 仍需真机验证三秒切换、前台切换竞态和多显示器行为。
+收藏、标签与应用排除测试覆盖旧记录迁移、收藏和标签筛选、标签规范化与级联删除、规则启停、所选应用元数据验证、稳定身份匹配、身份读取失败时跳过，以及元数据不改变图片文件和上传输入。macOS 与 Windows 仍需真机验证系统选择器初始目录、前台身份匹配和多显示器行为。
 
 自动同步测试覆盖迁移默认关闭、日期边界、已成功项目排除、失败项下周期重试、500 张分批、单活动批次竞争、修改间隔后的重排、重启不重放、安全错误暂停以及关闭开关时不创建网络任务。
 

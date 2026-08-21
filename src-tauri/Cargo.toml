@@ -47,6 +47,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGDataProvider", "CGImage"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSGeometry", "NSNotification", "NSOperation", "NSString", "block2"] }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["SCShareableContent", "SCScreenshotManager", "SCStream", "block2", "objc2-core-graphics"] }
+plist = "1.10.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [

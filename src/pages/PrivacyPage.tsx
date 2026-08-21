@@ -50,7 +50,7 @@ export function PrivacyPage({
   const updatingLaunchAtLogin = pendingAction === "autostart";
   const [privacyRules, setPrivacyRules] = useState<PrivacyAppRule[]>([]);
   const [privacyRuleError, setPrivacyRuleError] = useState<string | null>(null);
-  const [capturingApplicationIn, setCapturingApplicationIn] = useState<number | null>(null);
+  const [selectingApplication, setSelectingApplication] = useState(false);
 
   useEffect(() => {
     void desktopApi
@@ -59,15 +59,14 @@ export function PrivacyPage({
       .catch((reason) => setPrivacyRuleError(String(reason)));
   }, []);
 
-  async function addFrontmostApplication() {
+  async function selectPrivacyApplication() {
     setPrivacyRuleError(null);
+    setSelectingApplication(true);
     try {
-      for (let remaining = 3; remaining > 0; remaining -= 1) {
-        setCapturingApplicationIn(remaining);
-        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      const rule = await desktopApi.pickPrivacyApplicationRule();
+      if (!rule) {
+        return;
       }
-      setCapturingApplicationIn(0);
-      const rule = await desktopApi.addFrontmostPrivacyAppRule();
       setPrivacyRules((current) => [
         ...current.filter((item) => item.id !== rule.id),
         rule,
@@ -75,7 +74,7 @@ export function PrivacyPage({
     } catch (reason) {
       setPrivacyRuleError(String(reason));
     } finally {
-      setCapturingApplicationIn(null);
+      setSelectingApplication(false);
     }
   }
 
@@ -124,17 +123,13 @@ export function PrivacyPage({
           {lastCaptureNotice && <p className="settings-panel__hint">{lastCaptureNotice}</p>}
           <button
             className="button button--ghost"
-            disabled={!launchAtLoginSupported || capturingApplicationIn !== null}
-            onClick={() => void addFrontmostApplication()}
+            disabled={!launchAtLoginSupported || selectingApplication}
+            onClick={() => void selectPrivacyApplication()}
             type="button"
           >
-            {capturingApplicationIn === null
-              ? "3 秒后读取前台应用"
-              : capturingApplicationIn > 0
-                ? `请切换到目标应用（${capturingApplicationIn}）`
-                : "正在识别…"}
+            {selectingApplication ? "正在选择…" : "选择要排除的应用"}
           </button>
-          <small>点击后立即切换到要排除的应用；Electronic Journey 不保存窗口标题或进程路径。</small>
+          <small>从系统应用目录选择 .app 或 .exe；Electronic Journey 不保存窗口标题或完整进程路径。</small>
           {privacyRules.length === 0 ? (
             <p className="settings-panel__hint">尚未添加隐私应用。</p>
           ) : (

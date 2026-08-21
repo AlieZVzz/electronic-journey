@@ -189,11 +189,11 @@ export const desktopApi = {
     return invoke<PrivacyAppRule[]>("list_privacy_app_rules");
   },
 
-  async addFrontmostPrivacyAppRule(): Promise<PrivacyAppRule> {
+  async pickPrivacyApplicationRule(): Promise<PrivacyAppRule | null> {
     if (!isTauriRuntime()) {
       throw new Error("隐私应用排除只支持 macOS 和 Windows 桌面应用。");
     }
-    return invoke<PrivacyAppRule>("add_frontmost_privacy_app_rule");
+    return invoke<PrivacyAppRule | null>("pick_privacy_application_rule");
   },
 
   async setPrivacyAppRuleEnabled(ruleId: string, enabled: boolean): Promise<void> {

@@ -15,7 +15,7 @@ create_timeline_tag(name)
 delete_timeline_tag(tag_id)
 set_timeline_capture_tags(capture_id, tag_ids)
 list_privacy_app_rules()
-add_frontmost_privacy_app_rule()
+pick_privacy_application_rule()
 set_privacy_app_rule_enabled(rule_id, enabled)
 delete_privacy_app_rule(rule_id)
 refresh_screen_capture_permission()
@@ -32,6 +32,7 @@ request_screen_capture_permission()
 - `list_timeline_day_selection` 按当前系统时区解析 `YYYY-MM-DD`，只返回当天全部截图的 ID 和大小，用于跨分页选择，不读取图片内容。
 - `list_timeline_captures` 可接受 `favoriteOnly` 和单个 `tagId` 筛选，并返回收藏状态与本地标签。
 - `set_timeline_capture_favorite`、标签管理命令只更新 SQLite 元数据，不修改图片、哈希、上传历史或远端路径。
+- `pick_privacy_application_rule` 打开系统原生应用选择器：macOS 默认进入 `/Applications` 并验证 `.app` 的 Bundle Identifier，Windows 默认进入 Program Files 并验证 `.exe`；取消选择返回空值。
 - 隐私应用命令只返回本地显示名、平台、规则 ID 和启用状态；稳定应用标识始终留在 Rust/SQLite 边界内。
 - `AppSnapshot.lastCaptureNotice` 只返回固定的隐私跳过提示，不包含命中的应用名称或标识。
 - Rust 在主窗口之外的托盘操作或系统事件改变状态后发送 `runtime-state-changed`，事件不携带截图或状态正文；前端收到后重新调用 `get_app_snapshot`。

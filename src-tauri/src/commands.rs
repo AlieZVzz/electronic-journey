@@ -1005,19 +1005,46 @@ pub async fn list_privacy_app_rules(
 }
 
 #[tauri::command]
-pub async fn add_frontmost_privacy_app_rule(
+pub async fn pick_privacy_application_rule(
+    app: AppHandle,
     pool: State<'_, SqlitePool>,
-) -> Result<database::PrivacyAppRuleRecord, String> {
-    let application = privacy::frontmost_application()
-        .map_err(|_| "无法识别当前前台应用；请切换到目标应用后重试。".to_string())?;
-    database::upsert_privacy_app_rule(
+) -> Result<Option<database::PrivacyAppRuleRecord>, String> {
+    let dialog = app.dialog().file().set_title("选择要排除的应用");
+    #[cfg(target_os = "macos")]
+    let dialog = dialog
+        .set_directory("/Applications")
+        .add_filter("macOS 应用", &["app"]);
+    #[cfg(target_os = "windows")]
+    let dialog = {
+        let mut dialog = dialog.add_filter("Windows 应用", &["exe"]);
+        if let Some(directory) = std::env::var_os("ProgramFiles") {
+            dialog = dialog.set_directory(directory);
+        }
+        dialog
+    };
+    let selected = dialog.blocking_pick_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|_| "选择的项目不是可用的本地应用。".to_string())?;
+    let application = privacy::application_identity_from_path(&path).map_err(|_| {
+        if cfg!(target_os = "macos") {
+            "请选择有效的 macOS .app 应用。".to_string()
+        } else {
+            "请选择有效的 Windows .exe 应用。".to_string()
+        }
+    })?;
+    let rule = database::upsert_privacy_app_rule(
         pool.inner(),
         &application.platform,
         &application.identifier,
         &application.display_name,
     )
     .await
-    .map_err(|_| "无法保存隐私应用规则。".to_string())
+    .map_err(|_| "无法保存隐私应用规则。".to_string())?;
+    Ok(Some(rule))
 }
 
 #[tauri::command]
