@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { desktopApi } from "./api/desktop";
+import { CloseIcon } from "./components/AppIcons";
 import { FirstRunOnboarding } from "./components/FirstRunOnboarding";
 import { Sidebar } from "./components/Sidebar";
 import { WindowControls } from "./components/WindowControls";
@@ -83,7 +84,7 @@ export default function App() {
                   onClick={dismissNotice}
                   type="button"
                 >
-                  ×
+                  <CloseIcon />
                 </button>
               </div>
             )}

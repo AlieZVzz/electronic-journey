@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { desktopApi } from "../api/desktop";
+import { PlusIcon } from "../components/AppIcons";
 import { MetricCard } from "../components/MetricCard";
 import { ScreenCaptureDisclosure } from "../components/ScreenCaptureDisclosure";
 import { StatusPill } from "../components/StatusPill";
@@ -284,7 +285,9 @@ export function TodayPage({
             </figure>
           ) : (
             <div className="empty-canvas">
-              <span aria-hidden="true">{recentLoading ? "…" : "＋"}</span>
+              <span aria-hidden="true">
+                {recentLoading ? "…" : <PlusIcon />}
+              </span>
               <strong>
                 {recentLoading
                   ? "正在读取最近截图"

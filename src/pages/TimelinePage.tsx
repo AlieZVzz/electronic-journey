@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { desktopApi } from "../api/desktop";
+import { CloseIcon, StarIcon } from "../components/AppIcons";
 import { SelectControl } from "../components/SelectControl";
 import {
   addTimelineSelection,
@@ -1191,7 +1192,7 @@ export function TimelinePage() {
                           title={capture.favorite ? "取消收藏" : "加入收藏"}
                           type="button"
                         >
-                          {capture.favorite ? "★" : "☆"}
+                          <StarIcon active={capture.favorite} />
                         </button>
                       </div>
                       <button
@@ -1335,7 +1336,7 @@ export function TimelinePage() {
                   onClick={() => setUploadMessage(null)}
                   type="button"
                 >
-                  ×
+                  <CloseIcon />
                 </button>
               )}
             </div>
@@ -1348,7 +1349,7 @@ export function TimelinePage() {
                 onClick={() => setActionMessage(null)}
                 type="button"
               >
-                ×
+                <CloseIcon />
               </button>
             </div>
           )}
@@ -1545,7 +1546,7 @@ export function TimelinePage() {
                 onClick={closePreview}
                 type="button"
               >
-                ×
+                <CloseIcon />
               </button>
             </header>
             <div

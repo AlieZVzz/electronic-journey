@@ -1,4 +1,5 @@
 import { screenCaptureDisclosure } from "../lib/screenCaptureDisclosure";
+import { WarningIcon } from "./AppIcons";
 
 interface ScreenCaptureDisclosureProps {
   acknowledged: boolean;
@@ -13,7 +14,7 @@ export function ScreenCaptureDisclosure({
     <>
       <div className="capture-disclosure">
         <div className="capture-disclosure__warning" aria-hidden="true">
-          !
+          <WarningIcon />
         </div>
         <div>
           <strong>这不是每次都出现的窗口选择授权</strong>
