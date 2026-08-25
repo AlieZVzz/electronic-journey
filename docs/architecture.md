@@ -13,6 +13,7 @@ flowchart LR
     CORE --> FS["应用专用图片目录"]
     CORE --> KEY["系统钥匙串"]
     CORE --> SSH["固定主机指纹的 SFTP"]
+    CORE --> UPDATE["固定 GitHub Release + 更新签名验证"]
     SSH --> OWNED["用户个人服务器文件夹"]
 ```
 
@@ -26,6 +27,7 @@ flowchart LR
 - `timeline/`：SQLite 时间线和受控恢复扫描。
 - `database/`：截图、远程配置和上传队列。
 - `upload/`：输入验证、钥匙串、主机指纹、私钥认证和 SFTP 原子上传。
+- `app_update.rs`：用户主动检查 GitHub Release、版本复核、更新签名验证、安装互斥和进度事件。
 - `privacy/`：系统阻塞判定、macOS Bundle Identifier / Windows 路径哈希前台应用身份和本地排除规则匹配。
 - `commands.rs`：面向前端的窄命令与用户可读错误。
 
@@ -50,6 +52,16 @@ flowchart LR
 7. SQLite 持续写入逐项结果，UI 定时读取；页面切换只停止轮询，不终止上传。
 
 应用重启不会自动重放网络上传。远端文件夹之后由什么程序读取，位于客户端架构边界之外。
+
+## 应用更新数据流
+
+1. 用户在“关于与更新”点击检查，Rust 从固定 GitHub Release 地址读取公开 `latest.json`。
+2. UI 展示版本和更新说明；用户再次确认后才开始安装流程。
+3. 更新安装互斥阻止新的手动上传和自动同步；已有活动上传会使安装失败，不会被自动中断。
+4. Rust 停止截图调度，下载完整平台更新包并使用编译进应用的公钥验证签名。
+5. 验证通过后由 Tauri 替换应用并请求重启；失败只返回固定错误与恢复路径，不把响应正文或下载地址写入应用日志。
+
+更新请求不包含本地业务数据。当前安装包没有操作系统代码签名，因此项目级更新签名验证通过不代表 macOS Gatekeeper 或 Windows SmartScreen 会信任发布者。
 
 ## 本地组织与应用排除
 

@@ -1,3 +1,4 @@
+mod app_update;
 mod auto_sync;
 mod autostart;
 mod capture;
@@ -94,6 +95,8 @@ pub fn run() {
     trace_startup(StartupStage::ProcessEntered);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(app_update::UpdateRuntimeState::default())
         .manage(RuntimeState::default())
         .manage(upload::UploadDiagnosticsRegistry::default())
         .setup(|app| {
@@ -156,6 +159,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_snapshot,
+            app_update::get_app_version,
+            app_update::check_for_app_update,
+            app_update::install_app_update,
             commands::set_launch_at_login,
             commands::get_active_upload_batch,
             commands::get_latest_unhandled_interrupted_upload_batch,

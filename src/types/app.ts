@@ -168,4 +168,17 @@ export interface TimelineSelectionItem {
   fileSize: number;
 }
 
-export type PageId = "today" | "timeline" | "privacy" | "storage";
+export interface AppUpdateInfo {
+  currentVersion: string;
+  version: string;
+  notes: string | null;
+  publishedAt: string | null;
+}
+
+export interface AppUpdateProgress {
+  phase: "downloading" | "installing";
+  downloadedBytes: number;
+  totalBytes: number | null;
+}
+
+export type PageId = "today" | "timeline" | "privacy" | "storage" | "about";

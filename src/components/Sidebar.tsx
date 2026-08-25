@@ -45,6 +45,16 @@ const navigation: Array<{ id: PageId; label: string; icon: ReactNode }> = [
       </svg>
     ),
   },
+  {
+    id: "about",
+    label: "关于与更新",
+    icon: (
+      <svg viewBox="0 0 20 20">
+        <circle cx="10" cy="10" r="7" />
+        <path d="M10 9v5M10 6.2v.3" />
+      </svg>
+    ),
+  },
 ];
 
 interface SidebarProps {

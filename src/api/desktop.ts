@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { defaultCaptureSettings } from "../lib/settings";
 import type {
   AppSnapshot,
+  AppUpdateInfo,
   CaptureSettings,
   RecordingState,
   PrivacyAppRule,
@@ -57,6 +58,27 @@ export const desktopApi = {
 
   initialSnapshot(): AppSnapshot {
     return structuredClone(browserSnapshot);
+  },
+
+  async getAppVersion(): Promise<string> {
+    if (!isTauriRuntime()) {
+      return "0.1.2";
+    }
+    return invoke<string>("get_app_version");
+  },
+
+  async checkForAppUpdate(): Promise<AppUpdateInfo | null> {
+    if (!isTauriRuntime()) {
+      return null;
+    }
+    return invoke<AppUpdateInfo | null>("check_for_app_update");
+  },
+
+  async installAppUpdate(expectedVersion: string): Promise<void> {
+    if (!isTauriRuntime()) {
+      throw new Error("应用更新只能在已安装的桌面应用中执行。");
+    }
+    return invoke<void>("install_app_update", { expectedVersion });
   },
 
   async getSnapshot(): Promise<AppSnapshot> {

@@ -7,6 +7,9 @@ get_app_snapshot()
 set_launch_at_login(enabled)
 set_recording_state(state)
 update_capture_settings(settings)
+get_app_version()
+check_for_app_update()
+install_app_update(expected_version)
 list_timeline_captures(offset, limit, favoriteOnly, tagId)
 list_timeline_day_selection(date_key)
 set_timeline_capture_favorite(capture_id, favorite)
@@ -32,6 +35,9 @@ request_screen_capture_permission()
 - `list_timeline_day_selection` 按当前系统时区解析 `YYYY-MM-DD`，只返回当天全部截图的 ID 和大小，用于跨分页选择，不读取图片内容。
 - `list_timeline_captures` 可接受 `favoriteOnly` 和单个 `tagId` 筛选，并返回收藏状态与本地标签。
 - `set_timeline_capture_favorite`、标签管理命令只更新 SQLite 元数据，不修改图片、哈希、上传历史或远端路径。
+- `get_app_version` 只读取编译进应用的版本，不访问网络。
+- `check_for_app_update` 由用户主动调用，只访问固定 GitHub Release 更新清单，返回经过长度限制的公开版本说明；不返回下载地址或签名材料给前端。
+- `install_app_update` 再次检查候选版本必须等于用户确认的 `expected_version`，拒绝与活动上传并发，停止截图后由 Rust 下载、验证签名并安装。进度通过 `app-update-progress` 事件发送，事件只包含阶段与字节数。
 - `pick_privacy_application_rule` 打开系统原生应用选择器：macOS 默认进入 `/Applications` 并验证 `.app` 的 Bundle Identifier，Windows 默认进入 Program Files 并验证 `.exe`；取消选择返回空值。
 - 隐私应用命令只返回本地显示名、平台、规则 ID 和启用状态；稳定应用标识始终留在 Rust/SQLite 边界内。
 - `AppSnapshot.lastCaptureNotice` 只返回固定的隐私跳过提示，不包含命中的应用名称或标识。

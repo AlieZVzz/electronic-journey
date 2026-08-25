@@ -10,6 +10,7 @@ import {
   markOnboardingComplete,
 } from "./lib/onboarding";
 import { PrivacyPage } from "./pages/PrivacyPage";
+import { AboutPage } from "./pages/AboutPage";
 import { StoragePage } from "./pages/StoragePage";
 import { TimelinePage } from "./pages/TimelinePage";
 import { TodayPage } from "./pages/TodayPage";
@@ -21,6 +22,7 @@ const pageTitles: Record<PageId, string> = {
   timeline: "时间线",
   privacy: "隐私中心",
   storage: "远程存储",
+  about: "关于与更新",
 };
 
 export default function App() {
@@ -116,6 +118,7 @@ export default function App() {
                   />
                 )}
                 {activePage === "storage" && <StoragePage />}
+                {activePage === "about" && <AboutPage />}
               </>
             )}
           </div>

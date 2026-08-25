@@ -158,6 +158,12 @@ async fn run_claimed_cycle(
 }
 
 async fn claim_and_spawn(app: AppHandle, pool: SqlitePool, force: bool) -> Result<bool, String> {
+    if app
+        .state::<crate::app_update::UpdateRuntimeState>()
+        .is_installing()
+    {
+        return Ok(false);
+    }
     let profile = database::claim_auto_sync(&pool, upload::profile_id(), Utc::now(), force)
         .await
         .map_err(|_| "无法读取或更新自动同步计划。".to_string())?;

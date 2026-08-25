@@ -827,6 +827,9 @@ pub async fn refresh_screen_capture_permission(
 
 #[tauri::command]
 pub fn set_recording_state(state: RecordingState, app: AppHandle) -> Result<AppSnapshot, String> {
+    if state == RecordingState::Running {
+        crate::app_update::ensure_not_installing(&app)?;
+    }
     let snapshot = apply_recording_state(&app, state).map_err(|error| error.to_string())?;
     crate::tray::refresh(&app);
     Ok(snapshot)
@@ -1643,6 +1646,7 @@ pub async fn upload_selected_captures(
     diagnostics: State<'_, upload::UploadDiagnosticsRegistry>,
     capture_ids: Vec<String>,
 ) -> Result<upload::UploadBatchProgress, String> {
+    crate::app_update::ensure_not_installing(&app)?;
     let capture_ids = capture_ids
         .iter()
         .map(|capture_id| {
@@ -1687,6 +1691,7 @@ pub async fn retry_failed_upload_items(
     diagnostics: State<'_, upload::UploadDiagnosticsRegistry>,
     batch_id: String,
 ) -> Result<upload::UploadBatchProgress, String> {
+    crate::app_update::ensure_not_installing(&app)?;
     let batch_id =
         uuid::Uuid::parse_str(&batch_id).map_err(|_| "上传批次标识无效。".to_string())?;
     let capture_ids = crate::database::failed_upload_capture_ids(pool.inner(), batch_id)
@@ -1745,6 +1750,7 @@ pub async fn cancel_upload_batch(
 
 #[tauri::command]
 pub async fn sync_today_now(app: AppHandle, pool: State<'_, SqlitePool>) -> Result<(), String> {
+    crate::app_update::ensure_not_installing(&app)?;
     crate::auto_sync::start_now(app, pool.inner().clone()).await
 }
 

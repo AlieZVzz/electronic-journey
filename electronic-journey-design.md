@@ -227,6 +227,17 @@ SFTP v3 不提供通用远端 SHA-256，因此第一期验证传输前本地 SHA
 - 日志不得包含截图、缩略图、私钥、口令、远程完整路径、服务器响应正文或图片哈希。
 - 数据库不保存密钥和口令。
 - 主机指纹变化必须显式失败，不能自动更新。
+
+## 桌面应用更新
+
+- “关于与更新”显示当前版本；只有用户点击“检查更新”后，Rust 更新器才访问 `https://github.com/AlieZVzz/electronic-journey/releases/latest/download/latest.json`。
+- 检查请求和更新下载不携带截图、截图摘要、设备标识、SFTP 配置或使用统计；客户端不在后台静默检查。
+- 发现新版本后先展示目标版本和 Release 更新说明，用户再次确认才下载并安装。
+- 发布工作流为 macOS Apple Silicon、macOS Intel 和 Windows x64 生成完整更新包及 Tauri 签名，最后统一生成 `latest.json`；任何预期平台产物缺失时不得公开 Release。
+- 更新公钥编译进客户端，私钥只存在于维护者安全存储和 GitHub Actions Secret。更新包签名验证不可关闭。
+- 安装开始后停止截图并拒绝新的截图、手动上传和自动同步。若已有上传批次，安装必须失败并要求用户等待或显式取消，不自动中断或重放网络操作。
+- Windows 使用可见进度的 passive 安装模式；macOS 安装完成后请求应用重启。失败时保留当前应用和本地资料，提供重新检查路径。
+- 本阶段不做 Apple Developer ID、公证或 Windows Authenticode；UI 和发布文档必须提示 Gatekeeper/SmartScreen 仍可能警告。Tauri 更新签名不等同于操作系统代码签名。
 - 测试连接创建的文件名不含截图信息，并在验证后删除。
 - 上传失败与截图采集状态隔离。
 

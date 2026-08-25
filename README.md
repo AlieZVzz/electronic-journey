@@ -39,6 +39,7 @@ Electronic Journey 的设计目标是让记录过程可见、可控、可恢复�
 | 个人 SFTP 配置、手动选择上传、失败项重试/取消 | 已实现，部分平台凭据行为待验收 |
 | 自动同步 | 已实现，默认关闭 |
 | 稳定版发布和代码签名 | 尚未完成 |
+| 用户主动检查与签名更新 | 已实现；操作系统代码签名尚未完成 |
 
 详细进度见 `tasks/todo.md`，产品和安全约束见 `electronic-journey-design.md`。
 
@@ -155,7 +156,10 @@ git push origin v0.1.1
 - 应用版本必须同步更新 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json` 和根目录 `Cargo.toml`。
 - 未配置 Apple 开发者证书时，macOS 使用 ad-hoc 签名，仅适合内部测试。
 - Windows 安装包目前未进行 Authenticode 签名。
-- 公开分发前仍需完成可信代码签名、公证和安装提示验证。
+- 应用内更新包使用独立的 Tauri 更新签名验证来源和完整性；这不能替代 Apple Developer ID、公证或 Windows Authenticode。
+- 当前发布允许用户主动检查 GitHub Release 并确认安装，但 macOS Gatekeeper 与 Windows SmartScreen 仍可能警告或阻止未做操作系统代码签名的安装包。
+- 发布工作流需要仓库 Secret `TAURI_SIGNING_PRIVATE_KEY`。私钥不得写入仓库、日志或 Release；丢失后已安装客户端将无法信任后续更新。
+- 本地 `tauri build` 也需要把 `TAURI_SIGNING_PRIVATE_KEY` 设置为私钥文件路径（或私钥内容）；无密码私钥同时设置空的 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。debug app 脚本会显式关闭更新产物生成。
 
 ## 项目结构
 
