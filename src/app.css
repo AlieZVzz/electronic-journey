@@ -105,6 +105,26 @@
   --component-overlay-bg: rgba(255, 255, 255, 0.98);
   --component-overlay-border: var(--color-border-strong);
   --component-overlay-shadow: var(--shadow-level-3);
+  --component-feedback-success-bg: color-mix(
+    in srgb,
+    var(--color-surface-raised) 88%,
+    var(--color-success) 12%
+  );
+  --component-feedback-success-border: color-mix(
+    in srgb,
+    var(--color-surface-raised) 52%,
+    var(--color-success) 48%
+  );
+  --component-feedback-warning-bg: color-mix(
+    in srgb,
+    var(--color-surface-raised) 88%,
+    var(--color-warning) 12%
+  );
+  --component-feedback-warning-border: color-mix(
+    in srgb,
+    var(--color-surface-raised) 52%,
+    var(--color-warning) 48%
+  );
   --component-field-bg: #f8f9fc;
   --component-field-bg-hover: var(--palette-white);
   --component-field-border: rgba(54, 61, 82, 0.16);
@@ -1418,8 +1438,8 @@ h1 {
   gap: 12px;
   padding: 12px 14px;
   color: var(--color-success);
-  background: color-mix(in srgb, var(--color-success-soft) 96%, transparent);
-  border-color: var(--color-success-border);
+  background: var(--component-feedback-success-bg);
+  border-color: var(--component-feedback-success-border);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -1462,13 +1482,27 @@ h1 {
 }
 
 .upload-progress-toast__action {
+  display: inline-flex !important;
   flex: 0 0 auto;
-  padding: 5px 8px !important;
+  align-items: center;
+  justify-content: center;
+  width: auto !important;
+  min-width: max-content;
+  height: auto !important;
+  min-height: 32px;
+  padding: 5px 9px !important;
   color: currentColor !important;
-  border: 1px solid color-mix(in srgb, currentColor 34%, transparent) !important;
+  background: color-mix(in srgb, currentColor 10%, transparent) !important;
+  border: 1px solid currentColor !important;
   border-radius: 7px;
   font-size: 11px !important;
+  font-weight: 650;
   line-height: 1.2 !important;
+  white-space: nowrap;
+}
+
+.upload-progress-toast__action:hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 17%, transparent) !important;
 }
 
 .upload-progress-toast__action:disabled {
@@ -1477,8 +1511,8 @@ h1 {
 
 .upload-progress-toast.is-warning {
   color: var(--color-warning);
-  background: var(--color-warning-soft);
-  border-color: var(--color-warning-border);
+  background: var(--component-feedback-warning-bg);
+  border-color: var(--component-feedback-warning-border);
 }
 
 .upload-progress-toast.is-warning small {
@@ -1487,7 +1521,7 @@ h1 {
 
 .upload-progress-toast.is-warning .upload-progress-toast__action {
   color: currentColor !important;
-  border-color: color-mix(in srgb, currentColor 34%, transparent) !important;
+  border-color: currentColor !important;
 }
 
 @media (max-width: 720px) {
