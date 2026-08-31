@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { desktopApi } from "../api/desktop";
+import { ApplicationIcon, TrashIcon } from "../components/AppIcons";
 import { SelectControl } from "../components/SelectControl";
 import {
   captureSettingsEqual,
@@ -114,7 +115,7 @@ export function PrivacyPage({
 
       <div className="settings-panel">
         <section className="privacy-app-rules">
-          <div>
+          <div className="privacy-app-rules__intro">
             <strong>隐私应用排除</strong>
             <small>
               排除应用处于前台时，整次截图会跳过；不会保存或上传该周期的图片。
@@ -135,25 +136,40 @@ export function PrivacyPage({
           ) : (
             <ul className="privacy-app-rules__list">
               {privacyRules.map((rule) => (
-                <li key={rule.id}>
-                  <span>
-                    <strong>{rule.displayName}</strong>
-                    <small>{rule.platform === "macos" ? "macOS" : "Windows"}</small>
-                  </span>
-                  <label>
+                <li
+                  className={`privacy-app-rule${rule.enabled ? " is-enabled" : ""}`}
+                  key={rule.id}
+                >
+                  <div className="privacy-app-rule__identity">
+                    <span className="privacy-app-rule__icon">
+                      <ApplicationIcon />
+                    </span>
+                    <span className="privacy-app-rule__copy">
+                      <strong>{rule.displayName}</strong>
+                      <small>{rule.platform === "macos" ? "macOS 应用" : "Windows 应用"}</small>
+                    </span>
+                  </div>
+                  <label className="privacy-app-rule__toggle">
                     <input
+                      aria-label={`${rule.enabled ? "停用" : "启用"} ${rule.displayName} 的隐私排除`}
                       checked={rule.enabled}
                       onChange={() => void togglePrivacyRule(rule)}
+                      role="switch"
                       type="checkbox"
                     />
-                    启用
+                    <span aria-hidden="true" className="privacy-app-rule__toggle-track">
+                      <span />
+                    </span>
+                    <span>{rule.enabled ? "已启用" : "已停用"}</span>
                   </label>
                   <button
-                    className="button button--ghost"
+                    aria-label={`移除 ${rule.displayName}`}
+                    className="button privacy-app-rule__remove"
                     onClick={() => void removePrivacyRule(rule)}
                     type="button"
                   >
-                    移除
+                    <TrashIcon />
+                    <span>移除</span>
                   </button>
                 </li>
               ))}

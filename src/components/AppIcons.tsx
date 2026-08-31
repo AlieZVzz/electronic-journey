@@ -61,3 +61,30 @@ export function WarningIcon({ className }: IconProps) {
     </svg>
   );
 }
+
+export function ApplicationIcon({ className }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={iconClassName(className)}
+      focusable="false"
+      viewBox="0 0 20 20"
+    >
+      <rect height="13" rx="2.25" width="15" x="2.5" y="3.5" />
+      <path d="M3 7h14M6 5.25h.1M8 5.25h.1" />
+    </svg>
+  );
+}
+
+export function TrashIcon({ className }: IconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={iconClassName(className)}
+      focusable="false"
+      viewBox="0 0 20 20"
+    >
+      <path d="M4.5 6h11M8 3.75h4M6.25 6l.6 10h6.3l.6-10M8.25 8.5v5M11.75 8.5v5" />
+    </svg>
+  );
+}
