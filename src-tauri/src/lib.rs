@@ -105,6 +105,8 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_decorations(false)?;
             }
+            #[cfg(target_os = "windows")]
+            tray::install_menu_window(app.handle())?;
             let data_dir = app.path().app_local_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let pool = tauri::async_runtime::block_on(database::connect(
@@ -155,10 +157,16 @@ pub fn run() {
                     api.prevent_close();
                     let _ = window.hide();
                 }
+            } else if window.label() == "tray-menu"
+                && matches!(event, tauri::WindowEvent::Focused(false))
+            {
+                let _ = window.hide();
             }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_snapshot,
+            tray::get_tray_menu_snapshot,
+            tray::run_tray_menu_action,
             app_update::get_app_version,
             app_update::check_for_app_update,
             app_update::install_app_update,

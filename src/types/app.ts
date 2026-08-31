@@ -35,6 +35,26 @@ export interface AppSnapshot {
   launchAtLogin: boolean;
 }
 
+export interface TrayMenuSnapshot {
+  status: string;
+  permission: string;
+  todayCaptured: string;
+  todayUploaded: string;
+  permissionActionEnabled: boolean;
+  startEnabled: boolean;
+  pauseEnabled: boolean;
+  stopEnabled: boolean;
+}
+
+export type TrayMenuAction =
+  | "permission"
+  | "start"
+  | "pause"
+  | "stop"
+  | "open"
+  | "quit"
+  | "dismiss";
+
 export interface TimelineCapture {
   id: string;
   capturedAtUtc: string;

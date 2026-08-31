@@ -1,5 +1,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIcon, TrayIconBuilder},
@@ -23,6 +26,32 @@ const PAUSE_ID: &str = "tray-pause";
 const STOP_ID: &str = "tray-stop";
 const OPEN_ID: &str = "tray-open";
 const QUIT_ID: &str = "tray-quit";
+const TRAY_MENU_WINDOW: &str = "tray-menu";
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrayMenuSnapshot {
+    status: String,
+    permission: String,
+    today_captured: String,
+    today_uploaded: String,
+    permission_action_enabled: bool,
+    start_enabled: bool,
+    pause_enabled: bool,
+    stop_enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayMenuAction {
+    Permission,
+    Start,
+    Pause,
+    Stop,
+    Open,
+    Quit,
+    Dismiss,
+}
 
 pub struct TrayState {
     _icon: TrayIcon,
@@ -34,6 +63,30 @@ pub struct TrayState {
     start: MenuItem<tauri::Wry>,
     pause: MenuItem<tauri::Wry>,
     stop: MenuItem<tauri::Wry>,
+}
+
+#[cfg(target_os = "windows")]
+pub fn install_menu_window(app: &AppHandle) -> tauri::Result<()> {
+    tauri::WebviewWindowBuilder::new(
+        app,
+        TRAY_MENU_WINDOW,
+        tauri::WebviewUrl::App("index.html?window=tray-menu".into()),
+    )
+    .title("Electronic Journey")
+    .inner_size(360.0, 379.0)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(false)
+    .focused(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .shadow(true)
+    .visible(false)
+    .build()?;
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -156,7 +209,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let separator_one = PredefinedMenuItem::separator(app)?;
     let separator_two = PredefinedMenuItem::separator(app)?;
     let separator_three = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(
+    let _native_menu = Menu::with_items(
         app,
         &[
             &status,
@@ -175,9 +228,20 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     )?;
 
     let mut builder = TrayIconBuilder::with_id("electronic-journey-tray")
-        .menu(&menu)
         .tooltip(&presentation.tooltip)
         .on_menu_event(handle_menu_event);
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        builder = builder.menu(&_native_menu);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder
+            .show_menu_on_left_click(false)
+            .on_tray_icon_event(handle_tray_icon_event);
+    }
 
     #[cfg(target_os = "macos")]
     {
@@ -203,6 +267,48 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     });
     refresh(app);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_tray_menu_snapshot(app: AppHandle) -> Result<TrayMenuSnapshot, String> {
+    let summary = app
+        .state::<RuntimeState>()
+        .summary()
+        .map_err(|error| error.to_string())?;
+    let presentation = TrayPresentation::from_summary(&summary);
+    let pool = app.state::<sqlx::SqlitePool>().inner().clone();
+    let stats = database::today_capture_stats(&pool).await.ok();
+
+    Ok(TrayMenuSnapshot {
+        status: presentation.status,
+        permission: presentation.permission,
+        today_captured: stats
+            .as_ref()
+            .map(|stats| today_captured_label(stats.captured))
+            .unwrap_or_else(|| "今日截图：暂不可用".into()),
+        today_uploaded: stats
+            .as_ref()
+            .map(|stats| today_uploaded_label(stats.uploaded))
+            .unwrap_or_else(|| "今日已上传：暂不可用".into()),
+        permission_action_enabled: presentation.permission_action_enabled,
+        start_enabled: presentation.start_enabled,
+        pause_enabled: presentation.pause_enabled,
+        stop_enabled: presentation.stop_enabled,
+    })
+}
+
+#[tauri::command]
+pub fn run_tray_menu_action(app: AppHandle, action: TrayMenuAction) {
+    hide_tray_menu(&app);
+    match action {
+        TrayMenuAction::Permission => handle_action(&app, PERMISSION_ID),
+        TrayMenuAction::Start => handle_action(&app, START_ID),
+        TrayMenuAction::Pause => handle_action(&app, PAUSE_ID),
+        TrayMenuAction::Stop => handle_action(&app, STOP_ID),
+        TrayMenuAction::Open => handle_action(&app, OPEN_ID),
+        TrayMenuAction::Quit => handle_action(&app, QUIT_ID),
+        TrayMenuAction::Dismiss => {}
+    }
 }
 
 pub fn refresh(app: &AppHandle) {
@@ -255,7 +361,11 @@ pub fn refresh(app: &AppHandle) {
 }
 
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
-    match event.id().as_ref() {
+    handle_action(app, event.id().as_ref());
+}
+
+fn handle_action(app: &AppHandle, action_id: &str) {
+    match action_id {
         START_ID => match commands::apply_recording_state(app, RecordingState::Running) {
             Ok(_) => refresh(app),
             Err(AppError::CapturePermissionRequired) => show_permission_prompt(app),
@@ -277,6 +387,134 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         OPEN_ID => show_main_window(app),
         QUIT_ID => app.exit(0),
         _ => {}
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn handle_tray_icon_event(tray: &TrayIcon, event: TrayIconEvent) {
+    let TrayIconEvent::Click {
+        position,
+        button,
+        button_state,
+        ..
+    } = event
+    else {
+        return;
+    };
+    if button_state != MouseButtonState::Up
+        || !matches!(button, MouseButton::Left | MouseButton::Right)
+    {
+        return;
+    }
+
+    let app = tray.app_handle();
+    let Some(window) = app.get_webview_window(TRAY_MENU_WINDOW) else {
+        return;
+    };
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+        return;
+    }
+
+    position_tray_menu(app, &window, position.x, position.y);
+    refresh(app);
+    let _ = app.emit_to(TRAY_MENU_WINDOW, "tray-menu-opened", ());
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+#[cfg(target_os = "windows")]
+fn position_tray_menu(
+    app: &AppHandle,
+    window: &tauri::WebviewWindow,
+    anchor_x: f64,
+    anchor_y: f64,
+) {
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let Some(monitor) = app.monitor_from_point(anchor_x, anchor_y).ok().flatten() else {
+        return;
+    };
+    let work_area = monitor.work_area();
+    let work_left = f64::from(work_area.position.x);
+    let work_top = f64::from(work_area.position.y);
+    let work_right = work_left + f64::from(work_area.size.width);
+    let work_bottom = work_top + f64::from(work_area.size.height);
+    let width = f64::from(size.width);
+    let height = f64::from(size.height);
+    let gap = 6.0 * monitor.scale_factor();
+
+    let (x, y) = tray_menu_position(
+        work_left,
+        work_top,
+        work_right,
+        work_bottom,
+        anchor_x,
+        anchor_y,
+        width,
+        height,
+        gap,
+    );
+
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tray_menu_position(
+    work_left: f64,
+    work_top: f64,
+    work_right: f64,
+    work_bottom: f64,
+    anchor_x: f64,
+    anchor_y: f64,
+    width: f64,
+    height: f64,
+    gap: f64,
+) -> (i32, i32) {
+    let clamp = |value: f64, minimum: f64, maximum: f64| {
+        if maximum >= minimum {
+            value.clamp(minimum, maximum)
+        } else {
+            minimum
+        }
+    };
+
+    let mut x = clamp(
+        anchor_x - width / 2.0,
+        work_left + gap,
+        work_right - width - gap,
+    );
+    let y = if anchor_y < work_top {
+        work_top + gap
+    } else if anchor_y >= work_bottom {
+        work_bottom - height - gap
+    } else if anchor_x < work_left {
+        x = work_left + gap;
+        clamp(
+            anchor_y - height / 2.0,
+            work_top + gap,
+            work_bottom - height - gap,
+        )
+    } else if anchor_x >= work_right {
+        x = work_right - width - gap;
+        clamp(
+            anchor_y - height / 2.0,
+            work_top + gap,
+            work_bottom - height - gap,
+        )
+    } else if anchor_y - height - gap >= work_top {
+        anchor_y - height - gap
+    } else {
+        (anchor_y + gap).min(work_bottom - height - gap)
+    };
+
+    (x.round() as i32, y.round() as i32)
+}
+
+pub fn hide_tray_menu(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(TRAY_MENU_WINDOW) {
+        let _ = window.hide();
     }
 }
 
@@ -380,5 +618,21 @@ mod tests {
     fn today_stats_use_explicit_count_labels() {
         assert_eq!(today_captured_label(12), "今日截图：12 张");
         assert_eq!(today_uploaded_label(7), "今日已上传：7 张");
+    }
+
+    #[test]
+    fn tray_menu_anchors_above_a_bottom_taskbar_and_stays_inside_the_work_area() {
+        let position =
+            tray_menu_position(0.0, 0.0, 1920.0, 1040.0, 1880.0, 1060.0, 360.0, 379.0, 6.0);
+
+        assert_eq!(position, (1554, 655));
+    }
+
+    #[test]
+    fn tray_menu_anchors_left_of_a_right_side_taskbar() {
+        let position =
+            tray_menu_position(0.0, 0.0, 1880.0, 1080.0, 1900.0, 540.0, 360.0, 379.0, 6.0);
+
+        assert_eq!(position, (1514, 351));
     }
 }

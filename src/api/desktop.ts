@@ -13,6 +13,8 @@ import type {
   RemoteConnectionTest,
   RemoteProfile,
   SaveRemoteProfileInput,
+  TrayMenuAction,
+  TrayMenuSnapshot,
   UploadBatchProgress,
 } from "../types/app";
 
@@ -87,6 +89,14 @@ export const desktopApi = {
     }
 
     return invoke<AppSnapshot>("get_app_snapshot");
+  },
+
+  async getTrayMenuSnapshot(): Promise<TrayMenuSnapshot> {
+    return invoke<TrayMenuSnapshot>("get_tray_menu_snapshot");
+  },
+
+  async runTrayMenuAction(action: TrayMenuAction): Promise<void> {
+    return invoke<void>("run_tray_menu_action", { action });
   },
 
   async refreshScreenCapturePermission(): Promise<AppSnapshot> {
