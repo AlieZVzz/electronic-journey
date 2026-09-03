@@ -2,6 +2,15 @@
 
 All notable project changes are recorded here.
 
+## [0.1.4] - 2026-09-03
+
+### Changed
+
+- Added a native-style Windows tray menu for recording controls and status.
+- Updated Windows application and installer icons.
+- Improved privacy application rule icons and layout.
+- Refined upload feedback toast styling.
+
 ## [Unreleased]
 
 ### Added
